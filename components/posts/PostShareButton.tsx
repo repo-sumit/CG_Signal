@@ -6,10 +6,14 @@ import { Share2, Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { publicEnv } from "@/lib/env";
 import { cn } from "@/lib/utils/cn";
+import { track } from "@/lib/analytics/track";
+import { getClientContext, sendAnalyticsEvent } from "@/lib/analytics/client-context";
 
 export interface PostShareButtonProps {
   title: string;
   slug: string;
+  /** Stable post id — used for analytics correlation. Optional so legacy callers keep compiling. */
+  postId?: string;
   /** Primary author display name. Falls back to the contributors list. */
   authorName?: string | null;
   /** Additional contributor names — joined when more than the primary author exists. */
@@ -36,10 +40,27 @@ export interface PostShareButtonProps {
 export function PostShareButton({
   title,
   slug,
+  postId,
   authorName,
   contributorNames,
   className,
 }: PostShareButtonProps) {
+  const emitShare = useCallback(
+    (channel: string) => {
+      if (postId) {
+        track("share_clicked", { postId, slug, channel });
+        const ctx = getClientContext();
+        sendAnalyticsEvent({
+          eventName: "share_clicked",
+          sessionId: ctx.sessionId,
+          postId,
+          path: ctx.path,
+          metadata: { channel, slug },
+        });
+      }
+    },
+    [postId, slug],
+  );
   const [copied, setCopied] = useState(false);
 
   const resolveUrl = useCallback(() => {
@@ -79,6 +100,7 @@ export function PostShareButton({
       if (canShare) {
         try {
           await navigator.share(payload);
+          emitShare("native");
           return;
         } catch (err) {
           // User cancelled — AbortError. Anything else (PermissionDenied,
@@ -95,6 +117,7 @@ export function PostShareButton({
         setCopied(true);
         toast.success("Share link copied.");
         window.setTimeout(() => setCopied(false), 2200);
+        emitShare("copy");
         return;
       } catch {
         // Fall through to the execCommand fallback.
@@ -117,13 +140,14 @@ export function PostShareButton({
         setCopied(true);
         toast.success("Share link copied.");
         window.setTimeout(() => setCopied(false), 2200);
+        emitShare("legacy-copy");
       } catch {
         toast.error("Could not copy the link. Long-press the URL to copy manually.");
       } finally {
         document.body.removeChild(ta);
       }
     }
-  }, [resolveAuthorLabel, resolveUrl, title]);
+  }, [emitShare, resolveAuthorLabel, resolveUrl, title]);
 
   const Icon = copied ? Check : Share2;
   const Aux = copied ? null : <Copy className="h-3 w-3 opacity-60 sm:hidden" aria-hidden />;

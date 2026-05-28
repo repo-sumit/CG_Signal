@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { track } from "@/lib/analytics/track";
+import { getClientContext } from "@/lib/analytics/client-context";
 
 interface Props {
   postId: string;
@@ -13,25 +14,6 @@ interface Props {
 
 const THROTTLE_MS = 30 * 60 * 1000; // 30 minutes — matches server-side dedupe.
 const STORAGE_PREFIX = "cg_signal_viewed_";
-const SESSION_KEY = "cg_signal_session";
-
-/** Persists a stable per-browser session id so the server can dedupe POSTs. */
-function getOrCreateSessionId(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    const existing = window.localStorage.getItem(SESSION_KEY);
-    if (existing) return existing;
-    const fresh =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : Math.random().toString(36).slice(2) + Date.now().toString(36);
-    window.localStorage.setItem(SESSION_KEY, fresh);
-    return fresh;
-  } catch {
-    // Private mode / disabled storage — fall back to a per-tab session id.
-    return Math.random().toString(36).slice(2);
-  }
-}
 
 /** True when the post hasn't been viewed (from this browser) in the throttle window. */
 function shouldRecord(postId: string): boolean {
@@ -80,12 +62,22 @@ export function PostViewTracker({ postId, slug, title, author, isLoggedIn }: Pro
     // 2. Throttled Supabase record. Skip the network call when the same
     //    browser hit this post in the last 30 minutes.
     if (!shouldRecord(postId)) return;
-    const sessionId = getOrCreateSessionId();
-    const referrer = typeof document !== "undefined" ? document.referrer || null : null;
+    const ctx = getClientContext();
     void fetch("/api/analytics/post-view", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ postId, slug, sessionId, referrer }),
+      body: JSON.stringify({
+        postId,
+        slug,
+        sessionId: ctx.sessionId,
+        referrer: ctx.referrer,
+        path: ctx.path,
+        viewportWidth: ctx.viewportWidth,
+        viewportHeight: ctx.viewportHeight,
+        timeZone: ctx.timeZone,
+        language: ctx.language,
+        isLoggedIn,
+      }),
       // Best-effort. We don't await + don't surface errors — analytics
       // must never block the reader experience.
       keepalive: true,

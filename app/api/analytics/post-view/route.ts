@@ -1,8 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createHmac } from "node:crypto";
 import { z } from "zod";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
-import { serverEnv } from "@/lib/env";
+import {
+  hashIp,
+  extractIp,
+  extractGeo,
+  parseUserAgent,
+  upsertAnalyticsSession,
+} from "@/lib/analytics/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,28 +17,19 @@ const BodySchema = z.object({
   slug: z.string().min(1).max(200).optional(),
   sessionId: z.string().min(1).max(80).optional(),
   referrer: z.string().max(2048).optional().nullable(),
+  path: z.string().max(2048).optional().nullable(),
+  viewportWidth: z.number().int().min(0).max(20000).optional().nullable(),
+  viewportHeight: z.number().int().min(0).max(20000).optional().nullable(),
+  timeZone: z.string().max(80).optional().nullable(),
+  language: z.string().max(40).optional().nullable(),
+  isLoggedIn: z.boolean().optional(),
+  // Patch-style fields used by the post tracker's final beacon. Either set
+  // creates a new row when none exists; sending them on an existing session/
+  // post row updates time_spent_seconds / scroll_depth / read_complete.
+  timeSpentSeconds: z.number().int().min(0).max(86400).optional().nullable(),
+  scrollDepth: z.number().int().min(0).max(100).optional().nullable(),
+  readComplete: z.boolean().optional(),
 });
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Salted HMAC of the request IP — never store the raw value. */
-function hashIp(ip: string): string {
-  const secret = serverEnv().cronSecret || "fallback-ip-hash-salt";
-  return createHmac("sha256", secret).update(ip).digest("hex").slice(0, 32);
-}
-
-function extractIp(request: NextRequest): string | null {
-  // Vercel forwards via `x-forwarded-for`; behind a corporate proxy take the
-  // first hop. Fall back to "anonymous" so the hash is still deterministic
-  // per non-resolvable client.
-  const fwd = request.headers.get("x-forwarded-for");
-  if (fwd) {
-    const first = fwd.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  const real = request.headers.get("x-real-ip");
-  return real || null;
-}
 
 /**
  * POST /api/analytics/post-view
@@ -42,9 +38,10 @@ function extractIp(request: NextRequest): string | null {
  * anonymous viewers contribute via `session_id` (client-supplied stable id).
  *
  * Server-side dedupe: if any view for (post_id, session_id) was recorded in
- * the last 30 minutes, we 200 the request without inserting again. The client
- * also gates on localStorage so duplicate POSTs rarely reach us — this is
- * the defense-in-depth tier.
+ * the last 30 minutes, we update that row (with the new time-spent / scroll
+ * depth values) instead of inserting again. The client also gates on
+ * localStorage so duplicate POSTs rarely reach us — this is the defense-in-
+ * depth tier.
  */
 export async function POST(request: NextRequest) {
   let body: unknown;
@@ -59,7 +56,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, error: "Invalid input" }, { status: 400 });
   }
 
-  const { postId, slug, sessionId, referrer } = parsed.data;
+  const {
+    postId,
+    slug,
+    sessionId,
+    referrer,
+    path,
+    viewportWidth,
+    viewportHeight,
+    timeZone,
+    language,
+    isLoggedIn,
+    timeSpentSeconds,
+    scrollDepth,
+    readComplete,
+  } = parsed.data;
   if (!postId && !slug) {
     return NextResponse.json({ ok: false, error: "postId or slug required" }, { status: 400 });
   }
@@ -92,27 +103,65 @@ export async function POST(request: NextRequest) {
     } = await authed.auth.getUser();
     viewerId = user?.id ?? null;
   } catch {
-    // Cookies missing / Supabase down — still record as anonymous.
     viewerId = null;
   }
 
   const userAgent = request.headers.get("user-agent") ?? null;
   const ipRaw = extractIp(request);
   const ipHash = ipRaw ? hashIp(ipRaw) : null;
+  const ua = parseUserAgent(userAgent);
+  const geo = extractGeo(request);
 
-  // Dedupe: if we've already recorded a view in the last 30 minutes for the
-  // same session on the same post, return success without inserting.
+  // Dedupe / patch: if we've already recorded a view in the last 30 minutes
+  // for the same session on the same post, update that existing row with the
+  // latest time-spent / scroll-depth / read-complete values rather than
+  // inserting a fresh one.
   if (sessionId) {
     const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const { data: recent } = await service
       .from("post_views")
-      .select("id")
+      .select("id, time_spent_seconds, scroll_depth, read_complete")
       .eq("post_id", post.id)
       .eq("session_id", sessionId)
       .gte("created_at", since)
+      .order("created_at", { ascending: false })
       .limit(1);
-    if (recent && recent.length > 0) {
-      return NextResponse.json({ ok: true, deduped: true });
+    const recentRow = recent?.[0] as
+      | {
+          id: string;
+          time_spent_seconds: number | null;
+          scroll_depth: number | null;
+          read_complete: boolean | null;
+        }
+      | undefined;
+    if (recentRow) {
+      const patch: Record<string, unknown> = {};
+      if (typeof timeSpentSeconds === "number") {
+        const prev = recentRow.time_spent_seconds ?? 0;
+        if (timeSpentSeconds > prev) patch.time_spent_seconds = timeSpentSeconds;
+      }
+      if (typeof scrollDepth === "number") {
+        const prev = recentRow.scroll_depth ?? 0;
+        if (scrollDepth > prev) patch.scroll_depth = scrollDepth;
+      }
+      if (readComplete && !recentRow.read_complete) patch.read_complete = true;
+      if (Object.keys(patch).length > 0) {
+        await service.from("post_views").update(patch).eq("id", recentRow.id);
+      }
+      // Best-effort session bookkeeping even on dedupe.
+      await upsertAnalyticsSession({
+        sessionId,
+        userId: viewerId,
+        referrer: referrer ?? null,
+        landingPath: path ?? null,
+        userAgent,
+        ipHash,
+        device: ua,
+        country: geo.country,
+        city: geo.city,
+        isPageView: false,
+      }).catch(() => undefined);
+      return NextResponse.json({ ok: true, deduped: true, patched: Object.keys(patch).length > 0 });
     }
   }
 
@@ -123,11 +172,40 @@ export async function POST(request: NextRequest) {
     user_agent: userAgent,
     referrer: referrer ?? null,
     ip_hash: ipHash,
+    path: path ?? null,
+    device_type: ua.device_type,
+    browser: ua.browser,
+    os: ua.os,
+    country: geo.country,
+    city: geo.city,
+    viewport_width: viewportWidth ?? null,
+    viewport_height: viewportHeight ?? null,
+    time_zone: timeZone ?? null,
+    language: language ?? null,
+    is_logged_in: isLoggedIn ?? !!viewerId,
+    time_spent_seconds: timeSpentSeconds ?? null,
+    scroll_depth: scrollDepth ?? null,
+    read_complete: readComplete ?? false,
   });
   if (insErr) {
     console.error("[post-view] insert failed", insErr.message);
     // Don't surface DB errors to the client — analytics must not block reads.
     return NextResponse.json({ ok: true, recorded: false });
+  }
+
+  if (sessionId) {
+    await upsertAnalyticsSession({
+      sessionId,
+      userId: viewerId,
+      referrer: referrer ?? null,
+      landingPath: path ?? null,
+      userAgent,
+      ipHash,
+      device: ua,
+      country: geo.country,
+      city: geo.city,
+      isPageView: true,
+    }).catch(() => undefined);
   }
 
   return NextResponse.json({ ok: true, recorded: true });

@@ -64,6 +64,24 @@ interface PostScheduledEvent extends PostStatusEvent {
   scheduledForIso: string;
 }
 
+interface ScrollMilestone {
+  postId: string;
+  slug: string;
+  depth: 25 | 50 | 75 | 100;
+}
+
+interface ShareClicked {
+  postId: string;
+  slug: string;
+  channel: string;
+}
+
+interface TimeSpentUpdate {
+  postId: string;
+  slug: string;
+  seconds: number;
+}
+
 export type TrackEvents = {
   post_view: PostView;
   post_opened: PostOpened;
@@ -80,6 +98,12 @@ export type TrackEvents = {
   subscribe_success: SubscribeEvent;
   post_published: PostStatusEvent;
   post_scheduled: PostScheduledEvent;
+  /** Scroll quartile reached. Fired once per session/post. */
+  scroll_milestone: ScrollMilestone;
+  /** Share button clicked — channel: "whatsapp" | "linkedin" | "x" | "copy" etc. */
+  share_clicked: ShareClicked;
+  /** Visible time accumulated on the post page (periodic + final beacon). */
+  time_spent: TimeSpentUpdate;
 };
 
 export type TrackEventName = keyof TrackEvents;

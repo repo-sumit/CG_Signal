@@ -16,6 +16,7 @@ import {
 import { REACTION_EMOJIS, REACTION_LABELS, type ReactionEmoji } from "@/lib/reactions";
 import { toggleReaction } from "@/app/posts/[slug]/actions";
 import { track } from "@/lib/analytics/track";
+import { getClientContext, sendAnalyticsEvent } from "@/lib/analytics/client-context";
 import { cn } from "@/lib/utils/cn";
 
 interface Props {
@@ -110,6 +111,15 @@ export function ReactionsBar({ postId, postSlug, counts, myReactions, isAuthenti
       slug: postSlug,
       emoji,
       toggled: wasOn ? "off" : "on",
+    });
+    // Persist into analytics_events for the admin dashboard rollup.
+    const ctx = getClientContext();
+    sendAnalyticsEvent({
+      eventName: wasOn ? "reaction_removed" : "reaction_added",
+      sessionId: ctx.sessionId,
+      postId,
+      path: ctx.path,
+      metadata: { emoji, slug: postSlug },
     });
     // Optimistic toggle
     setLocal((prev) => {

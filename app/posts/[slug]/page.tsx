@@ -20,6 +20,7 @@ import { PortalFooter } from "@/components/layout/PortalFooter";
 import { CommentsSection } from "@/components/comments/CommentsSection";
 import { ReactionsBar } from "@/components/reactions/ReactionsBar";
 import { PostViewTracker } from "@/components/analytics/PostViewTracker";
+import { PostAnalyticsTracker } from "@/components/analytics/PostAnalyticsTracker";
 import { PostShareButton } from "@/components/posts/PostShareButton";
 import { SubscribeSection } from "@/components/landing/SubscribeSection";
 import { SubscribeMiniCta } from "@/components/landing/SubscribeMiniCta";
@@ -196,6 +197,7 @@ export default async function PublicPostPage(props: { params: Promise<{ slug: st
                     full-width row below. */}
                 <div className="hidden sm:block">
                   <PostShareButton
+                    postId={post.id}
                     title={post.title}
                     slug={post.slug}
                     authorName={post.author?.full_name ?? post.author?.email ?? null}
@@ -205,6 +207,7 @@ export default async function PublicPostPage(props: { params: Promise<{ slug: st
               {/* Mobile share — full-width row below the byline. */}
               <div className="mt-3 sm:hidden">
                 <PostShareButton
+                  postId={post.id}
                   title={post.title}
                   slug={post.slug}
                   authorName={post.author?.full_name ?? post.author?.email ?? null}
@@ -241,6 +244,19 @@ export default async function PublicPostPage(props: { params: Promise<{ slug: st
             author={post.author?.full_name ?? post.author?.email ?? null}
             isLoggedIn={!!session}
           />
+
+          {/* Behavioural tracking — scroll depth, time spent, read completion.
+              Fires its own events stream into analytics_events. Mounted only
+              for non-contributor readers so the editorial team isn't part of
+              their own engagement metrics. */}
+          {!isContributor && (
+            <PostAnalyticsTracker
+              postId={post.id}
+              slug={post.slug}
+              isLoggedIn={!!session}
+              estimatedReadMinutes={post.read_time_minutes ?? null}
+            />
+          )}
 
           {/* Subscribe — sits after the article body so readers see it at
               peak engagement, but before reactions/comments so it doesn't

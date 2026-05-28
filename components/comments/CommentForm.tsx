@@ -7,6 +7,7 @@ import { Loader2, Send } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { addComment } from "@/app/posts/[slug]/actions";
 import { track } from "@/lib/analytics/track";
+import { getClientContext, sendAnalyticsEvent } from "@/lib/analytics/client-context";
 import { cn } from "@/lib/utils/cn";
 
 interface Props {
@@ -59,6 +60,14 @@ export function CommentForm({ postId, postSlug, isAuthenticated }: Props) {
       }
       setBody("");
       track("comment_added", { postId, slug: postSlug });
+      const ctx = getClientContext();
+      sendAnalyticsEvent({
+        eventName: "comment_added",
+        sessionId: ctx.sessionId,
+        postId,
+        path: ctx.path,
+        metadata: { slug: postSlug },
+      });
       toast.success("Comment posted.");
       router.refresh();
     });
