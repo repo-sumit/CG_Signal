@@ -129,6 +129,21 @@ export async function POST(request: NextRequest) {
   const postId =
     typeof rawPostId === "string" && UUID_RE.test(rawPostId) ? rawPostId : null;
 
+  // When the upload targets a specific post, the caller must be allowed to EDIT
+  // it (owner, manager, or editor collaborator). This blocks a reviewer
+  // collaborator from uploading media into a draft they can only read.
+  if (postId) {
+    const { data: canEdit, error: rpcErr } = await supabase.rpc("can_edit_draft_post", {
+      p_post_id: postId,
+    });
+    if (rpcErr) {
+      return NextResponse.json({ error: "Could not verify post access." }, { status: 500 });
+    }
+    if (canEdit !== true) {
+      return NextResponse.json({ error: "You can't add media to this post." }, { status: 403 });
+    }
+  }
+
   const { data: asset } = await supabase
     .from("media_assets")
     .insert({

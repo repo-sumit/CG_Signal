@@ -38,6 +38,12 @@ export default async function NewEditorPage(
   }
 
   const tags = await listTags();
+  const currentUser = {
+    id: userId,
+    name: (profile.full_name && profile.full_name.trim()) || profile.email,
+    email: profile.email,
+    avatarUrl: profile.avatar_url,
+  };
   return (
     <PostEditor
       tags={tags}
@@ -47,6 +53,20 @@ export default async function NewEditorPage(
         title: "",
         content_json: WEEKLY_TEMPLATE,
         status: "draft",
+      }}
+      collaboration={{
+        // A brand-new post is owned by its creator. Collaborator management +
+        // review comments unlock once the draft has been saved (so it has an id).
+        canEdit: true,
+        relationship: "owner",
+        isOwner: true,
+        canManageCollaborators: true,
+        currentUser,
+        owner: currentUser,
+        collaborators: [],
+        reviewComments: [],
+        approvedTeammates: [],
+        initialLock: null,
       }}
     />
   );

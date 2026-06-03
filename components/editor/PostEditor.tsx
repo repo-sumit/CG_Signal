@@ -27,7 +27,11 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { EditorToolbar } from "@/components/editor/EditorToolbar";
 import { SchedulePostModal } from "@/components/editor/SchedulePostModal";
+import { CollaboratorsPanel } from "@/components/editor/CollaboratorsPanel";
+import { ReviewCommentsPanel } from "@/components/editor/ReviewCommentsPanel";
 import { createTagAsAuthor, savePost } from "@/app/(app)/editor/actions";
+import { LOCK_HEARTBEAT_MS, type EditorCollaborationProps, type LockHolder } from "@/lib/auth/collaboration";
+import { Eye, Lock as LockIcon, Pencil } from "lucide-react";
 import { wordCount } from "@/lib/utils/read-time";
 import { formatScheduledLabel } from "@/lib/utils/dates";
 import { track } from "@/lib/analytics/track";
@@ -51,6 +55,7 @@ interface Props {
   tags: Pick<TagRow, "id" | "name" | "slug">[];
   role: AppRole;
   requireReview: boolean;
+  collaboration: EditorCollaborationProps;
 }
 
 interface PostImage {
@@ -66,9 +71,15 @@ const AUTOSAVE_MS = 15_000;
 // fire it five times faster. Worst-case lost work between two writes is ~3s.
 const LOCAL_BACKUP_MS = 3_000;
 
-export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
+export function PostEditor({ initialPost, tags, role, requireReview, collaboration }: Props) {
   const router = useRouter();
   const isNew = !initialPost?.id;
+
+  // --- Collaboration roles -------------------------------------------------
+  const { relationship, canEdit, currentUser } = collaboration;
+  const isReviewer = relationship === "reviewer";
+  const isCollabEditor = relationship === "editor";
+  const isOwnerOrManager = relationship === "owner" || relationship === "manager";
 
   const initialTitle = initialPost?.title === "Untitled draft" ? "" : (initialPost?.title ?? "");
 
@@ -110,6 +121,7 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
   const editor = useEditor({
     extensions: editorExtensions(),
     content: (initialPost?.content_json as object) ?? { type: "doc", content: [{ type: "paragraph" }] },
+    editable: canEdit,
     editorProps: {
       attributes: { class: "prose max-w-none focus:outline-none" },
       // Run Google-Docs / Word HTML through the paste sanitizer BEFORE
@@ -120,6 +132,97 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
     },
     immediatelyRender: false,
   });
+
+  // --- Edit lock -----------------------------------------------------------
+  // `lockedByOther` is set when another user holds the active lock — editing is
+  // disabled until they release it (or an owner/manager takes over).
+  const initialOtherHolder =
+    collaboration.initialLock && collaboration.initialLock.lockedBy.id !== currentUser.id
+      ? collaboration.initialLock.lockedBy
+      : null;
+  const [lockedByOther, setLockedByOther] = useState<LockHolder | null>(initialOtherHolder);
+  // Content is editable only when the user may edit AND no one else holds the lock.
+  const canEditContent = canEdit && lockedByOther === null;
+
+  const acquireLock = useCallback(async () => {
+    if (!postId || !canEdit) return;
+    try {
+      const res = await fetch(`/api/posts/${postId}/lock`, { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        lockedBy?: LockHolder | null;
+      };
+      if (res.status === 409) {
+        setLockedByOther(data.lockedBy ?? null);
+        return;
+      }
+      if (res.ok && data.ok) setLockedByOther(null);
+    } catch {
+      /* network blip — keep current state, heartbeat will retry */
+    }
+  }, [postId, canEdit]);
+
+  // Acquire on mount / once a brand-new post has an id, and refresh on a
+  // heartbeat so the lock never lapses while the tab is active.
+  useEffect(() => {
+    if (!postId || !canEdit) return;
+    void acquireLock();
+    const interval = setInterval(() => {
+      void (async () => {
+        try {
+          const res = await fetch(`/api/posts/${postId}/lock/heartbeat`, { method: "POST" });
+          if (res.status === 409) {
+            const data = (await res.json().catch(() => ({}))) as { lockedBy?: LockHolder | null };
+            // Another user holds it → drop to read-only. No holder → the lock
+            // lapsed and is free, so re-acquire it for ourselves.
+            if (data.lockedBy) setLockedByOther(data.lockedBy);
+            else void acquireLock();
+          } else if (res.ok) {
+            setLockedByOther(null);
+          }
+        } catch {
+          /* ignore */
+        }
+      })();
+    }, LOCK_HEARTBEAT_MS);
+    return () => clearInterval(interval);
+  }, [postId, canEdit, acquireLock]);
+
+  // Release the lock when leaving the editor (SPA unmount + hard navigation).
+  useEffect(() => {
+    if (!postId || !canEdit) return;
+    const url = `/api/posts/${postId}/lock/unlock`;
+    const release = () => {
+      try {
+        navigator.sendBeacon?.(url, new Blob([], { type: "application/json" }));
+      } catch {
+        /* ignore */
+      }
+    };
+    window.addEventListener("beforeunload", release);
+    return () => {
+      window.removeEventListener("beforeunload", release);
+      void fetch(url, { method: "POST", keepalive: true }).catch(() => {});
+    };
+  }, [postId, canEdit]);
+
+  // Keep ProseMirror's editable flag in sync with permission + lock state.
+  useEffect(() => {
+    if (!editor) return;
+    editor.setEditable(canEditContent);
+  }, [editor, canEditContent]);
+
+  // Owner / manager "take over": force-release another holder's lock, then grab it.
+  const handleTakeOver = useCallback(async () => {
+    if (!postId) return;
+    try {
+      await fetch(`/api/posts/${postId}/lock/unlock`, { method: "POST" });
+      await acquireLock();
+      toast.success("You're now editing this post.");
+    } catch {
+      toast.error("Couldn't take over editing.");
+    }
+  }, [postId, acquireLock]);
 
   // Track whether the user edited during an in-flight save. If so, we must NOT
   // overwrite the post-save state with "saved" — the editor content has diverged
@@ -247,6 +350,7 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
   // Autosave loop (debounced via timeout). Skips when a manual save is in
   // flight so we don't queue a second request that could race the first.
   useEffect(() => {
+    if (!canEditContent) return;
     if (saveState !== "unsaved") return;
     if (manualSaveInFlight.current) return;
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
@@ -257,7 +361,7 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
     return () => {
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     };
-  }, [saveState, handleSave]);
+  }, [saveState, handleSave, canEditContent]);
 
   // Local-storage backup loop. Independent of server autosave so a crash
   // between two server saves leaves at most ~3s of work missing. See
@@ -265,6 +369,7 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
   const localBackupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!editor) return;
+    if (!canEditContent) return;
     if (saveState !== "unsaved") return;
     if (localBackupTimer.current) clearTimeout(localBackupTimer.current);
     localBackupTimer.current = setTimeout(() => {
@@ -293,6 +398,7 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
     scheduledFor,
     selectedTagIds,
     coverMediaId,
+    canEditContent,
   ]);
 
   // Mount: look for a local snapshot newer than the server's last update.
@@ -447,6 +553,15 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
     setBusyAction(null);
     if (res?.ok) toast.success("Draft saved.");
   }, [handleSave]);
+
+  // Editor collaborators can only save content — the server preserves the
+  // post's status, so we pass it through unchanged.
+  const handleSaveChanges = useCallback(async () => {
+    setBusyAction("draft");
+    const res = await handleSave(status);
+    setBusyAction(null);
+    if (res?.ok) toast.success("Changes saved.");
+  }, [handleSave, status]);
 
   const handlePostNow = useCallback(async () => {
     if (!title.trim()) {
@@ -662,6 +777,49 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
         </span>
       </div>
 
+      {/* Collaboration mode banner — locked > reviewer > collaborator editor. */}
+      {lockedByOther ? (
+        <div
+          role="status"
+          className="mb-3 flex flex-col gap-2 rounded-md border border-portal-yellow/40 bg-portal-yellow/5 p-3 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="flex items-center gap-2 text-sm text-portal-text">
+            <LockIcon className="h-4 w-4 shrink-0 text-portal-yellow" />
+            <span>
+              <strong>{lockedByOther.name}</strong> is editing this post. You can review, but
+              editing is locked.
+            </span>
+          </div>
+          {isOwnerOrManager && (
+            <Button type="button" variant="secondary" size="sm" onClick={handleTakeOver}>
+              Take over editing
+            </Button>
+          )}
+        </div>
+      ) : isReviewer ? (
+        <div
+          role="status"
+          className="mb-3 flex items-center gap-2 rounded-md border border-portal-blue/40 bg-portal-blue/5 p-3 text-sm text-portal-text"
+        >
+          <Eye className="h-4 w-4 shrink-0 text-portal-blue" />
+          <span>
+            <strong>Review mode.</strong> You can read the draft and leave comments. Editing is
+            disabled.
+          </span>
+        </div>
+      ) : isCollabEditor ? (
+        <div
+          role="status"
+          className="mb-3 flex items-center gap-2 rounded-md border border-portal-green/40 bg-portal-green/5 p-3 text-sm text-portal-text"
+        >
+          <Pencil className="h-4 w-4 shrink-0 text-portal-green" />
+          <span>
+            <strong>Editing unlocked for you.</strong> You're collaborating on this draft — the
+            owner controls publishing.
+          </span>
+        </div>
+      ) : null}
+
       {/* Local-draft restore banner. Renders only when we found a newer
           local snapshot than what the server has — typically after a tab
           crash. Discard clears the snapshot so it can't haunt later mounts. */}
@@ -701,49 +859,70 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
         </div>
       )}
 
-      {/* Publish action bar — horizontal on desktop, full-width stacked on mobile. */}
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
-        <Button
-          variant="outline"
-          onClick={handleSaveDraft}
-          disabled={anyActionBusy}
-          className="w-full sm:w-auto sm:flex-1 sm:max-w-[200px]"
-        >
-          {busyAction === "draft" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Save className="h-4 w-4" />
-          )}
-          Save Draft
-        </Button>
-        <Button
-          variant="secondary"
-          onClick={() => setScheduleModalOpen(true)}
-          disabled={anyActionBusy || titleEmpty}
-          title={titleEmpty ? "Add a title first" : undefined}
-          className="w-full sm:w-auto sm:flex-1 sm:max-w-[220px]"
-        >
-          {busyAction === "schedule" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Calendar className="h-4 w-4" />
-          )}
-          Schedule Post
-        </Button>
-        <Button
-          onClick={handlePostNow}
-          disabled={anyActionBusy || titleEmpty}
-          title={titleEmpty ? "Add a title first" : undefined}
-          className="w-full sm:w-auto sm:flex-1 sm:max-w-[220px]"
-        >
-          {busyAction === "now" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Send className="h-4 w-4" />
-          )}
-          {postNowLabel}
-        </Button>
-      </div>
+      {/* Publish action bar. Owner/manager get the full publish verbs; an
+          editor collaborator gets a single content-only "Save changes"
+          (the server preserves status); reviewers get no save controls. */}
+      {isOwnerOrManager && (
+        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
+          <Button
+            variant="outline"
+            onClick={handleSaveDraft}
+            disabled={anyActionBusy || !!lockedByOther}
+            className="w-full sm:w-auto sm:flex-1 sm:max-w-[200px]"
+          >
+            {busyAction === "draft" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            Save Draft
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => setScheduleModalOpen(true)}
+            disabled={anyActionBusy || titleEmpty || !!lockedByOther}
+            title={titleEmpty ? "Add a title first" : undefined}
+            className="w-full sm:w-auto sm:flex-1 sm:max-w-[220px]"
+          >
+            {busyAction === "schedule" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Calendar className="h-4 w-4" />
+            )}
+            Schedule Post
+          </Button>
+          <Button
+            onClick={handlePostNow}
+            disabled={anyActionBusy || titleEmpty || !!lockedByOther}
+            title={titleEmpty ? "Add a title first" : undefined}
+            className="w-full sm:w-auto sm:flex-1 sm:max-w-[220px]"
+          >
+            {busyAction === "now" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+            {postNowLabel}
+          </Button>
+        </div>
+      )}
+      {isCollabEditor && (
+        <div className="mb-3">
+          <Button
+            variant="outline"
+            onClick={handleSaveChanges}
+            disabled={anyActionBusy || !canEditContent}
+            className="w-full sm:w-auto sm:max-w-[220px]"
+          >
+            {busyAction === "draft" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            Save changes
+          </Button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         {/* Left column: toolbar + editor card as SIBLINGS, not parent/child.
@@ -753,13 +932,15 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
             toolbar OUT of the Card means its nearest scroll ancestor is the
             body, so it pins to the viewport like we want. */}
         <div className="flex min-w-0 flex-col gap-3">
-          <EditorToolbar
-            editor={editor}
-            onInsertImage={() => pickFile("image/*", handleFileInsert("image"))}
-            onInsertVideo={() => pickFile("video/*", handleFileInsert("video"))}
-            onInsertAudio={() => pickFile("audio/*", handleFileInsert("audio"))}
-            onInsertEmbed={handleEmbed}
-          />
+          {canEditContent && (
+            <EditorToolbar
+              editor={editor}
+              onInsertImage={() => pickFile("image/*", handleFileInsert("image"))}
+              onInsertVideo={() => pickFile("video/*", handleFileInsert("video"))}
+              onInsertAudio={() => pickFile("audio/*", handleFileInsert("audio"))}
+              onInsertEmbed={handleEmbed}
+            />
+          )}
           <Card className="min-w-0">
             <CardContent className="p-0">
               <div className="space-y-4 px-4 pt-4 pb-4 sm:px-6 sm:pt-5 sm:pb-5">
@@ -777,6 +958,7 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
                       setSaveState("unsaved");
                     }}
                     onBlur={() => setTitleTouched(true)}
+                    readOnly={!canEditContent}
                     placeholder="Give your transmission a title…"
                     aria-required="true"
                     aria-invalid={titleInvalid || undefined}
@@ -805,6 +987,7 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
                       setExcerpt(e.target.value);
                       setSaveState("unsaved");
                     }}
+                    readOnly={!canEditContent}
                     placeholder="Short summary used in feed cards and previews…"
                     className="min-h-[64px] resize-y border-2 border-portal-border-soft bg-portal-panel-soft text-sm leading-relaxed"
                     maxLength={500}
@@ -816,8 +999,9 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
 
               {/* Floating selection toolbar — shows on any text selection.
                   Hidden automatically when selection collapses; tippy handles
-                  positioning + scroll/outside-click hiding. */}
-              {editor && (
+                  positioning + scroll/outside-click hiding. Suppressed in
+                  read-only / reviewer / locked mode. */}
+              {editor && canEditContent && (
                 <BubbleMenu
                   editor={editor}
                   tippyOptions={{ duration: 100, placement: "top" }}
@@ -915,46 +1099,68 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
                     You and collaborators can keep editing until the slot hits — the post stays
                     private to the team until then.
                   </p>
-                  <div className="grid grid-cols-1 gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setScheduleModalOpen(true)}
-                      disabled={anyActionBusy}
-                    >
-                      <Calendar className="h-3.5 w-3.5" /> Edit schedule
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={handlePostNow}
-                      disabled={anyActionBusy || titleEmpty}
-                    >
-                      {busyAction === "now" ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Send className="h-3.5 w-3.5" />
-                      )}
-                      Post now
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={handleRevertToDraft}
-                      disabled={anyActionBusy}
-                    >
-                      {busyAction === "revert" ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <RotateCcw className="h-3.5 w-3.5" />
-                      )}
-                      Back to draft
-                    </Button>
-                  </div>
+                  {isOwnerOrManager && (
+                    <div className="grid grid-cols-1 gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setScheduleModalOpen(true)}
+                        disabled={anyActionBusy || !!lockedByOther}
+                      >
+                        <Calendar className="h-3.5 w-3.5" /> Edit schedule
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={handlePostNow}
+                        disabled={anyActionBusy || titleEmpty || !!lockedByOther}
+                      >
+                        {busyAction === "now" ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Send className="h-3.5 w-3.5" />
+                        )}
+                        Post now
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleRevertToDraft}
+                        disabled={anyActionBusy || !!lockedByOther}
+                      >
+                        {busyAction === "revert" ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RotateCcw className="h-3.5 w-3.5" />
+                        )}
+                        Back to draft
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>
           </Card>
 
+          <CollaboratorsPanel
+            postId={postId}
+            canManage={collaboration.canManageCollaborators}
+            owner={collaboration.owner}
+            currentUserId={currentUser.id}
+            collaborators={collaboration.collaborators}
+            approvedTeammates={collaboration.approvedTeammates}
+          />
+
+          <ReviewCommentsPanel
+            postId={postId}
+            canComment={relationship !== "none"}
+            canModerate={isOwnerOrManager}
+            currentUserId={currentUser.id}
+            comments={collaboration.reviewComments}
+          />
+
+          {/* Edit-only sidebar cards — hidden in reviewer / locked / read-only mode. */}
+          {canEditContent && (
+            <>
           {/* Thumbnail picker — fulfills the "upload or pick from inserted images" UX */}
           <Card>
             <CardHeader>
@@ -1179,6 +1385,8 @@ export function PostEditor({ initialPost, tags, role, requireReview }: Props) {
               </Button>
             </CardContent>
           </Card>
+            </>
+          )}
         </aside>
       </div>
 

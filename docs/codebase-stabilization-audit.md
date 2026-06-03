@@ -43,60 +43,46 @@ No `any` in code. TypeScript strict + `noUncheckedIndexedAccess` both on.
 | **Mobile responsive** | ✅ working | n/a | `overflow-x: clip` on html/body, `min-w-0` on grid cells, responsive editor toolbar, stacked publish buttons. | None |
 | **Favicon** | ✅ working | n/a | `public/favicon.ico` + `public/og-default.png` + Next metadata `icons` config. | None |
 
-## Genuinely-missing features (DEFERRED)
+## Previously-deferred large features
 
-These four were on the brief but require multi-file scope (new DB tables, RLS policies, API routes, UI surfaces, and complex permission edges). Attempting all four in a single round risks half-finished, hard-to-review code; safer to keep them deferred and ship them one-at-a-time later.
+Three of the four large features below shipped in the collaboration pass
+(migration `0013_collaboration.sql`). See `docs/collaboration-feature.md` for
+the full reference and `docs/collaboration-implementation-audit.md` for the
+root-cause table. The fourth (profile-in-DB) remains deferred.
 
-### 1. Real collaboration (`post_collaborators` table)
+### 1. Real collaboration (`post_collaborators` table) — ✅ IMPLEMENTED
 
-**Status:** not implemented.
+- Migration `0013_collaboration.sql` adds `post_collaborators` (+ `post_edit_locks`,
+  `post_review_comments`, `post_contributors`) with recursion-safe security-definer
+  RLS helpers (`can_read_draft_post`, `can_edit_draft_post`, `can_review_draft_post`).
+- `posts_read_published` now lets invited collaborators read drafts; a new
+  `posts_update_collaborator` policy lets editor collaborators update content, with
+  ownership frozen by the `tg_posts_protect_author` trigger.
+- Server actions: `inviteCollaborator`, `removeCollaborator`, `updateCollaboratorRole`,
+  `addReviewComment`, `deleteReviewComment`, `resolveReviewComment` in
+  `app/(app)/editor/actions.ts`. `savePost` resolves the caller's relationship and
+  blocks reviewers/non-collaborators.
+- UI: `components/editor/CollaboratorsPanel.tsx` + `components/editor/ReviewCommentsPanel.tsx`;
+  review comments are deleted on publish.
 
-**What's needed:**
-- Migration: `post_collaborators (post_id, user_id, role text check (role in ('editor','reviewer')), invited_by, created_at, unique(post_id, user_id))`.
-- RLS policies: viewers can read draft posts they're invited to; editors can update content of those drafts; reviewers can only insert into `post_review_comments` (see below).
-- Editor-side UI: collaborator panel in the sidebar (sits next to the existing Tags card).
-- Permission gate inside `savePost`: if `userId` isn't the author AND isn't an editor collaborator AND isn't a manager, reject.
-- Review-comment table + delete-on-publish hook.
+### 2. One-person-at-a-time edit lock — ✅ IMPLEMENTED
 
-**Entry points when this lands:**
-- `supabase/migrations/0013_collaboration.sql` — new tables + RLS
-- `app/(app)/editor/actions.ts` — `inviteCollaborator`, `removeCollaborator`, `addReviewComment`, `resolveReviewComment` actions
-- `components/editor/CollaboratorsPanel.tsx` — new sidebar card
-- `components/editor/ReviewCommentsPanel.tsx` — new sidebar card with delete-on-publish hook in `savePost`
+- Migration adds `post_edit_locks (post_id pk, locked_by, locked_at, expires_at)`.
+- API: `POST /api/posts/[id]/lock`, `…/heartbeat`, `…/unlock` (5-minute TTL,
+  60-second heartbeat). Client acquires on mount, heartbeats, releases on unload.
+- `savePost` rejects a save when an active lock is held by another user and
+  requires editor collaborators to hold the lock first.
+- Owner/manager "Take over editing" force-unlock from the lock banner.
 
-### 2. One-person-at-a-time edit lock
+### 3. Multi-contributor model (`post_contributors`) — ✅ TABLE + CREDIT IMPLEMENTED
 
-**Status:** not implemented.
+- Migration adds `post_contributors (post_id, user_id, role, display_order)` and
+  backfills an `owner` row for every existing post.
+- On publish, `savePost` records the owner + every editor collaborator as
+  contributors (`syncContributorsOnPublish`). Public byline display on post cards /
+  OG metadata is a follow-up (the data is now captured).
 
-**What's needed:**
-- Migration: `post_edit_locks (post_id pk, locked_by, locked_at, expires_at)`.
-- Heartbeat API: `POST /api/posts/[id]/lock`, `…/heartbeat`, `…/unlock`. 5-minute TTL, 60-second heartbeat from the client.
-- Editor-side ticker that pings heartbeat while the page is focused.
-- Save guard inside `savePost`: if lock exists AND `locked_by !== userId` AND `expires_at > now()`, reject with "This post is currently locked by another editor."
-- Manager force-unlock button on stale locks (`expires_at < now()` UI state).
-
-**Entry points:**
-- `supabase/migrations/0014_edit_locks.sql`
-- `app/api/posts/[id]/lock/route.ts` and siblings
-- `components/editor/EditorLockHeartbeat.tsx` — client ticker
-- Lock check at the top of `savePost` in `app/(app)/editor/actions.ts`
-
-### 3. Multi-contributor model (`post_contributors`)
-
-**Status:** not implemented. The current schema models one `author_id` per post.
-
-**What's needed:**
-- Migration: `post_contributors (post_id, user_id, role text check (role in ('owner','editor','contributor')), display_order)`.
-- Backfill: every existing post gets one row with `role='owner'`.
-- UI: a "Co-authors" picker in the editor sidebar.
-- Display: post cards / detail / OG metadata / email / share message all show the contributor list joined by `" and contributors"` (the share button already supports this shape).
-
-**Entry points:**
-- `supabase/migrations/0015_post_contributors.sql`
-- `lib/db/posts.ts` — extend `PostWithAuthor` to a list, update `listPublicPosts` / `getPublicPostBySlug` joins
-- `components/landing/PostThumbnail.tsx` and `app/posts/[slug]/page.tsx` — already accept a `contributorNames[]` prop on `PostShareButton`; metadata + cards need the same.
-
-### 4. Profile metadata in database (vs `lib/team.ts`)
+### 4. Profile metadata in database (vs `lib/team.ts`) — still DEFERRED
 
 **Status:** not implemented. Designation / pod / topics still live in a hand-edited TypeScript file ([lib/team.ts](../lib/team.ts)).
 
@@ -132,7 +118,7 @@ I can't truly run the app against Supabase from here, but a static-review pass:
 - **Resend domain verification is a manual step.** Until `RESEND_FROM` points at a verified non-`@resend.dev` domain, only the Resend account owner receives newsletter emails. Documented in `docs/resend-newsletter-delivery.md` + diagnostics endpoint flags this as `isSandboxSender: true`.
 - **Supabase Storage free-tier per-file cap is 50 MB.** Matches our video cap, so OK for free tier; needs Pro for the documented 200 MB bucket setting if usage grows.
 - **Vercel cron on Hobby tier is daily-only.** `publish-scheduled` runs at 09:00 UTC daily; posts scheduled to specific minutes inside the day get published at the next 09:00 UTC tick. Pro tier removes this.
-- **The four deferred features** above (collaboration / locks / multi-contributor / profile-in-DB) are sized for a dedicated future pass.
+- **Collaboration / edit locks / multi-contributor** shipped in the `0013_collaboration.sql` pass (see `docs/collaboration-feature.md`). **Profile-in-DB** (designation/pod/topics columns vs `lib/team.ts`) remains the one deferred feature.
 - **In-editor preview was removed** (was crashing the editor by unmounting `EditorContent` + `BubbleMenu` mid-render). Authors preview by Save-Draft + opening the post URL in another tab.
 
 ## Files changed this pass

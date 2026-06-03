@@ -6,6 +6,11 @@ export type PostStatus = "draft" | "submitted" | "scheduled" | "published" | "ar
 export type MediaType = "image" | "video" | "audio" | "document";
 export type MediaSourceType = "upload" | "external_url";
 
+/** Collaboration role on a single post — distinct from the app-wide AppRole. */
+export type PostCollaboratorRole = "editor" | "reviewer";
+/** Public co-author credit role. */
+export type PostContributorRole = "owner" | "editor" | "contributor";
+
 export interface ProfileRow {
   id: string;
   email: string;
@@ -83,6 +88,40 @@ export interface PostTemplateRow {
   created_at: string;
 }
 
+export interface PostCollaboratorRow {
+  id: string;
+  post_id: string;
+  user_id: string;
+  role: PostCollaboratorRole;
+  invited_by: string | null;
+  created_at: string;
+}
+
+export interface PostEditLockRow {
+  post_id: string;
+  locked_by: string;
+  locked_at: string;
+  expires_at: string;
+}
+
+export interface PostReviewCommentRow {
+  id: string;
+  post_id: string;
+  user_id: string;
+  body: string;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+export interface PostContributorRow {
+  id: string;
+  post_id: string;
+  user_id: string;
+  role: PostContributorRole;
+  display_order: number;
+  created_at: string;
+}
+
 // `Database` is intentionally permissive — we only use it as a generic to the
 // Supabase client so server queries compile without `any`. Replace with
 // generated types (`supabase gen types typescript`) in production.
@@ -111,6 +150,10 @@ export type Database = {
       media_assets: GenericTable;
       post_tags: GenericTable;
       audit_logs: GenericTable;
+      post_collaborators: GenericTable;
+      post_edit_locks: GenericTable;
+      post_review_comments: GenericTable;
+      post_contributors: GenericTable;
     };
     Views: { [_ in never]: never };
     Functions: {
@@ -127,6 +170,13 @@ export type Database = {
       current_user_role: { Args: Record<string, never>; Returns: AppRole };
       is_author_or_manager: { Args: Record<string, never>; Returns: boolean };
       is_authorized_author: { Args: Record<string, never>; Returns: boolean };
+      is_post_owner: { Args: { p_post_id: string }; Returns: boolean };
+      is_post_collaborator: { Args: { p_post_id: string }; Returns: boolean };
+      is_post_editor_collaborator: { Args: { p_post_id: string }; Returns: boolean };
+      can_read_draft_post: { Args: { p_post_id: string }; Returns: boolean };
+      can_edit_draft_post: { Args: { p_post_id: string }; Returns: boolean };
+      can_review_draft_post: { Args: { p_post_id: string }; Returns: boolean };
+      can_manage_post_collaborators: { Args: { p_post_id: string }; Returns: boolean };
     };
     Enums: {
       app_role: AppRole;

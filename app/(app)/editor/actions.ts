@@ -3,7 +3,14 @@
 import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
-import { requireSession } from "@/lib/auth/guards";
+import { requireSession, requireAuthor } from "@/lib/auth/guards";
+import {
+  getCollaboratorRole,
+  getActiveLock,
+  resolvePostAccess,
+} from "@/lib/db/collaboration";
+import { deriveAccess } from "@/lib/auth/collaboration";
+import type { PostStatus } from "@/lib/db/types";
 import { slugify, withSuffix } from "@/lib/utils/slugs";
 import { weekStartISO } from "@/lib/utils/dates";
 import { readTimeFromHtml } from "@/lib/utils/read-time";
@@ -79,6 +86,43 @@ function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
+/**
+ * Publish-time cleanup. Review comments are draft-only feedback, so they must
+ * never survive into a published post — and the edit lock is meaningless once
+ * the post is live. Both are wiped with the service client (the caller has
+ * already been verified as owner/manager). Idempotent: safe to re-run.
+ */
+async function cleanupReviewArtifactsOnPublish(postId: string): Promise<void> {
+  const service = createSupabaseServiceClient();
+  await Promise.all([
+    service.from("post_review_comments").delete().eq("post_id", postId),
+    service.from("post_edit_locks").delete().eq("post_id", postId),
+  ]);
+}
+
+/**
+ * Records public co-author credit when a post goes live: the owner plus every
+ * editor collaborator. Reviewers are intentionally excluded. Upsert keyed on
+ * (post_id, user_id) so re-publishing never duplicates rows.
+ */
+async function syncContributorsOnPublish(postId: string, ownerId: string): Promise<void> {
+  const service = createSupabaseServiceClient();
+  const rows: Array<{ post_id: string; user_id: string; role: string; display_order: number }> = [
+    { post_id: postId, user_id: ownerId, role: "owner", display_order: 0 },
+  ];
+  const { data: editors } = await service
+    .from("post_collaborators")
+    .select("user_id")
+    .eq("post_id", postId)
+    .eq("role", "editor");
+  let order = 10;
+  for (const e of (editors ?? []) as { user_id: string }[]) {
+    if (e.user_id === ownerId) continue;
+    rows.push({ post_id: postId, user_id: e.user_id, role: "editor", display_order: order++ });
+  }
+  await service.from("post_contributors").upsert(rows, { onConflict: "post_id,user_id" });
+}
+
 export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   const totalStart = performance.now();
   const parsed = SavePostSchema.safeParse(input);
@@ -98,16 +142,6 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   const readTime = readTimeFromHtml(html);
   const trimmedTitle = normalizePostText(data.title.trim());
   const normalizedExcerpt = data.excerpt ? normalizePostText(data.excerpt.trim()) : null;
-
-  // Title is required for anything beyond a draft. Drafts may save empty so
-  // the autosave doesn't keep failing while the author is still typing.
-  if (data.status !== "draft" && trimmedTitle.length === 0) {
-    return {
-      ok: false,
-      error: "Title is required before publishing.",
-      fieldErrors: { title: "Title is required." },
-    };
-  }
 
   // PARALLELIZE three reads: session+profile, the existing post row (when
   // editing), and the post's current tag set (so we can skip the re-sync when
@@ -141,11 +175,11 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     ? Promise.resolve(
         supabase
           .from("media_assets")
-          .select("owner_id, media_type")
+          .select("owner_id, media_type, post_id")
           .eq("id", data.cover_media_id)
           .maybeSingle(),
-      ).then((res) => ({ data: res.data as { owner_id: string; media_type: string } | null }))
-    : Promise.resolve({ data: null as { owner_id: string; media_type: string } | null });
+      ).then((res) => ({ data: res.data as { owner_id: string; media_type: string; post_id: string | null } | null }))
+    : Promise.resolve({ data: null as { owner_id: string; media_type: string; post_id: string | null } | null });
 
   const [{ userId, profile }, existingRes, tagsRes, coverRes] = await Promise.all([
     requireSession(),
@@ -159,6 +193,45 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     return { ok: false, error: "You don't have permission to author posts." };
   }
 
+  // Resolve the caller's relationship to an EXISTING post and enforce the edit
+  // lock. A brand-new post (no id) is authored by the caller, so this is a
+  // no-op for the create path. Reviewers + non-collaborators are blocked here;
+  // editor collaborators may only change content, never the publish status.
+  const existing = existingRes.data;
+  let isCollaboratorEdit = false;
+  let frozenStatus: PostStatus | null = null;
+  if (data.id) {
+    if (!existing) return { ok: false, error: "Post not found." };
+    const [collaboratorRole, activeLock] = await Promise.all([
+      getCollaboratorRole(supabase, data.id, userId),
+      getActiveLock(supabase, data.id),
+    ]);
+    const access = deriveAccess({
+      authorId: existing.author_id,
+      userId,
+      role: profile.role,
+      collaboratorRole,
+    });
+    if (!access.canEdit) {
+      return { ok: false, error: "You don't have permission to edit this post." };
+    }
+    // Never write over an active lock held by another user (one-at-a-time),
+    // and require editor collaborators to actually hold the lock first.
+    if (activeLock && activeLock.lockedBy.id !== userId) {
+      return { ok: false, error: `This post is currently locked by ${activeLock.lockedBy.name}.` };
+    }
+    if (access.relationship === "editor" && !(activeLock && activeLock.lockedBy.id === userId)) {
+      return {
+        ok: false,
+        error: "Acquire the edit lock before saving — another editor may be working on this post.",
+      };
+    }
+    if (access.relationship === "editor") {
+      isCollaboratorEdit = true;
+      frozenStatus = existing.status as PostStatus;
+    }
+  }
+
   // Determine desired status. The new publish flow has three explicit verbs —
   // Save Draft, Schedule Post, Post Now — which set draft / scheduled / published
   // respectively. The optional manager-review gate still demotes a Post Now to
@@ -167,12 +240,28 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   if (publicEnv.requireManagerReview && profile.role === "author" && desiredStatus === "published") {
     desiredStatus = "submitted";
   }
+  // Editor collaborators can never change the publish status — their save only
+  // touches content. Freeze the status to whatever the post already has.
+  if (isCollaboratorEdit && frozenStatus) {
+    desiredStatus = frozenStatus;
+  }
+
+  // Title is required for anything beyond a draft. Drafts may save empty so the
+  // autosave doesn't keep failing while the author is still typing. Collaborator
+  // edits don't change status, so they skip this gate.
+  if (!isCollaboratorEdit && desiredStatus !== "draft" && trimmedTitle.length === 0) {
+    return {
+      ok: false,
+      error: "Title is required before publishing.",
+      fieldErrors: { title: "Title is required." },
+    };
+  }
 
   // Scheduling is now FULLY manual via the Schedule Post modal. We only honour
   // scheduled_for when the client explicitly set status === "scheduled", and
   // we enforce that the slot is in the future so authors can't backdate.
   let scheduledFor: string | null = null;
-  if (desiredStatus === "scheduled") {
+  if (!isCollaboratorEdit && desiredStatus === "scheduled") {
     if (!data.scheduled_for) {
       return {
         ok: false,
@@ -191,12 +280,20 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     scheduledFor = new Date(slot).toISOString();
   }
 
-  // Cover ownership check — the supplied media_assets row must belong to this
-  // user; otherwise we silently null it (safer than rejecting the whole save).
+  // Cover validity check — the supplied media_assets row must be an image the
+  // caller can legitimately use: one they uploaded, one already attached to
+  // this post (so collaborators can pick an image the owner inserted), or any
+  // image when the caller is a manager. Otherwise we silently null it (safer
+  // than rejecting the whole save).
   let coverMediaId: string | null | undefined = data.cover_media_id;
   if (coverMediaId) {
     const c = coverRes.data;
-    if (!c || c.owner_id !== userId || c.media_type !== "image") {
+    const belongsToThisPost = !!data.id && !!c && c.post_id === data.id;
+    const usable =
+      !!c &&
+      c.media_type === "image" &&
+      (c.owner_id === userId || belongsToThisPost || profile.role === "manager");
+    if (!usable) {
       coverMediaId = null;
     }
   }
@@ -204,13 +301,9 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   let postId = data.id;
   let slug: string;
 
-  if (postId) {
-    // Update path. We already have the existing row from the parallel fetch.
-    const existing = existingRes.data;
-    if (!existing) return { ok: false, error: "Post not found." };
-    if (existing.author_id !== userId && profile.role !== "manager") {
-      return { ok: false, error: "You cannot edit this post." };
-    }
+  if (postId && existing) {
+    // Update path. Permission + edit-lock already enforced above; `existing`
+    // is the row from the parallel fetch.
 
     // If the title changed, regenerate a unique slug — otherwise keep stable.
     slug = existing.slug;
@@ -227,23 +320,27 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
       excerpt: normalizedExcerpt,
       content_json: data.content_json,
       content_html: html,
-      status: desiredStatus,
-      scheduled_for: scheduledFor,
       cover_media_id: coverMediaId ?? null,
       read_time_minutes: readTime,
     };
-    if (desiredStatus === "published") {
-      // Always stamp the publish time on "Post Now" so the public byline
-      // matches the live moment, even if the post had a previous run as a
-      // scheduled draft.
-      update.published_at = new Date().toISOString();
+    // Editor collaborators only touch content — never status / scheduling /
+    // publish timestamps. Owner + manager saves carry the full status change.
+    if (!isCollaboratorEdit) {
+      update.status = desiredStatus;
+      update.scheduled_for = scheduledFor;
+      if (desiredStatus === "published") {
+        // Always stamp the publish time on "Post Now" so the public byline
+        // matches the live moment, even if the post had a previous run as a
+        // scheduled draft.
+        update.published_at = new Date().toISOString();
+      }
+      // Clear published_at when a post moves back to scheduled or draft so the
+      // live date reflects the next real publish, not an earlier run.
+      if (desiredStatus === "scheduled" || desiredStatus === "draft") {
+        update.published_at = null;
+      }
+      if (desiredStatus === "archived") update.archived_at = new Date().toISOString();
     }
-    // Clear published_at when a post moves back to scheduled or draft so the
-    // live date reflects the next real publish, not an earlier run.
-    if (desiredStatus === "scheduled" || desiredStatus === "draft") {
-      update.published_at = null;
-    }
-    if (desiredStatus === "archived") update.archived_at = new Date().toISOString();
 
     const updateStart = performance.now();
     const { error: updErr } = await supabase.from("posts").update(update).eq("id", postId);
@@ -309,9 +406,18 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     }
   }
 
-  // Per-post newsletter — fired once when a post becomes "published". The DB
-  // column newsletter_sent_at gates duplicates so re-saves never re-send.
-  if (desiredStatus === "published" && postId) {
+  // Publish-only side effects. Skipped for collaborator content edits (they
+  // can't change status, so a published post they touch is already live and
+  // these have already run). The owner of record is the existing author, or
+  // the caller for a brand-new post.
+  if (desiredStatus === "published" && postId && !isCollaboratorEdit) {
+    const ownerId = existing?.author_id ?? userId;
+    // Draft review comments + the edit lock must not survive into a live post.
+    await cleanupReviewArtifactsOnPublish(postId);
+    // Public co-author credit (owner + editor collaborators).
+    await syncContributorsOnPublish(postId, ownerId);
+    // Per-post newsletter — fired once when a post becomes "published". The DB
+    // column newsletter_sent_at gates duplicates so re-saves never re-send.
     // Fire-and-forget: never block the editor on the email round-trip. The
     // function itself is idempotent so a missed/retried call is safe.
     void sendPerPostNewsletter(postId).catch((err) => {
@@ -519,3 +625,244 @@ export async function permanentDeletePost(id: string): Promise<SavePostResult> {
  * compiling. Will be removed in a follow-up.
  */
 export const archivePost = softDeletePost;
+
+// ============================================================
+// Collaboration — invite / remove / role, and draft review comments.
+// All of these enforce permission server-side (owner/manager for collaborator
+// management; anyone who can review for comments) on top of RLS.
+// ============================================================
+
+export interface CollaboratorActionResult {
+  ok: boolean;
+  error?: string;
+}
+
+const PostUserSchema = z.object({
+  postId: z.string().uuid(),
+  userId: z.string().uuid(),
+});
+
+const PostUserRoleSchema = PostUserSchema.extend({
+  role: z.enum(["editor", "reviewer"]),
+});
+
+/** Owner / manager invites an approved teammate as editor or reviewer. */
+export async function inviteCollaborator(input: {
+  postId: string;
+  userId: string;
+  role: "editor" | "reviewer";
+}): Promise<CollaboratorActionResult> {
+  const parsed = PostUserRoleSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  }
+  const { postId, userId: inviteeId, role } = parsed.data;
+  const { userId, profile } = await requireAuthor();
+  const supabase = await createSupabaseServerClient();
+
+  const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
+  if (!post) return { ok: false, error: "Post not found." };
+  if (!access.canManageCollaborators) {
+    return { ok: false, error: "Only the post owner or an admin can manage collaborators." };
+  }
+  if (inviteeId === post.authorId) {
+    return { ok: false, error: "The owner is already on this post." };
+  }
+
+  // Only active, approved teammates (author/manager) can be invited — never a
+  // random viewer or external commenter.
+  const { data: inviteeRow } = await supabase
+    .from("profiles")
+    .select("id, role, is_active")
+    .eq("id", inviteeId)
+    .maybeSingle();
+  const invitee = inviteeRow as { id: string; role: string; is_active: boolean } | null;
+  if (!invitee || !invitee.is_active || (invitee.role !== "author" && invitee.role !== "manager")) {
+    return { ok: false, error: "You can only invite approved teammates." };
+  }
+
+  const { error } = await supabase.from("post_collaborators").insert({
+    post_id: postId,
+    user_id: inviteeId,
+    role,
+    invited_by: userId,
+  });
+  if (error) {
+    if (error.code === "23505") {
+      return { ok: false, error: "That teammate is already a collaborator." };
+    }
+    return { ok: false, error: error.message };
+  }
+  revalidatePath(`/editor/${postId}`);
+  revalidatePath("/me/posts");
+  return { ok: true };
+}
+
+/** Owner / manager removes a collaborator (and releases any lock they hold). */
+export async function removeCollaborator(input: {
+  postId: string;
+  userId: string;
+}): Promise<CollaboratorActionResult> {
+  const parsed = PostUserSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  }
+  const { postId, userId: targetId } = parsed.data;
+  const { userId, profile } = await requireAuthor();
+  const supabase = await createSupabaseServerClient();
+
+  const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
+  if (!post) return { ok: false, error: "Post not found." };
+  if (!access.canManageCollaborators) {
+    return { ok: false, error: "Only the post owner or an admin can manage collaborators." };
+  }
+
+  const { error } = await supabase
+    .from("post_collaborators")
+    .delete()
+    .eq("post_id", postId)
+    .eq("user_id", targetId);
+  if (error) return { ok: false, error: error.message };
+  // Free their edit lock so a removed editor can't keep the post locked.
+  await supabase.from("post_edit_locks").delete().eq("post_id", postId).eq("locked_by", targetId);
+
+  revalidatePath(`/editor/${postId}`);
+  revalidatePath("/me/posts");
+  return { ok: true };
+}
+
+/** Owner / manager changes a collaborator's role. */
+export async function updateCollaboratorRole(input: {
+  postId: string;
+  userId: string;
+  role: "editor" | "reviewer";
+}): Promise<CollaboratorActionResult> {
+  const parsed = PostUserRoleSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  }
+  const { postId, userId: targetId, role } = parsed.data;
+  const { userId, profile } = await requireAuthor();
+  const supabase = await createSupabaseServerClient();
+
+  const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
+  if (!post) return { ok: false, error: "Post not found." };
+  if (!access.canManageCollaborators) {
+    return { ok: false, error: "Only the post owner or an admin can manage collaborators." };
+  }
+
+  const { error } = await supabase
+    .from("post_collaborators")
+    .update({ role })
+    .eq("post_id", postId)
+    .eq("user_id", targetId);
+  if (error) return { ok: false, error: error.message };
+  // A reviewer can't hold the edit lock — release it on downgrade.
+  if (role === "reviewer") {
+    await supabase.from("post_edit_locks").delete().eq("post_id", postId).eq("locked_by", targetId);
+  }
+
+  revalidatePath(`/editor/${postId}`);
+  revalidatePath("/me/posts");
+  return { ok: true };
+}
+
+const ReviewCommentSchema = z.object({
+  postId: z.string().uuid(),
+  body: z.string().trim().min(1, "Comment can't be empty.").max(500, "Comment is too long (max 500)."),
+});
+
+/** Anyone who can review the draft (owner/manager/collaborator) leaves a note. */
+export async function addReviewComment(input: {
+  postId: string;
+  body: string;
+}): Promise<CollaboratorActionResult> {
+  const parsed = ReviewCommentSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  }
+  const { postId, body } = parsed.data;
+  const { userId, profile } = await requireAuthor();
+  const supabase = await createSupabaseServerClient();
+
+  const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
+  if (!post) return { ok: false, error: "Post not found." };
+  if (!access.canComment) {
+    return { ok: false, error: "You don't have access to review this post." };
+  }
+
+  const { error } = await supabase
+    .from("post_review_comments")
+    .insert({ post_id: postId, user_id: userId, body });
+  if (error) return { ok: false, error: error.message };
+
+  revalidatePath(`/editor/${postId}`);
+  return { ok: true };
+}
+
+const CommentIdSchema = z.object({ commentId: z.string().uuid() });
+
+async function loadReviewComment(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  commentId: string,
+): Promise<{ id: string; post_id: string; user_id: string; resolved_at: string | null } | null> {
+  const { data } = await supabase
+    .from("post_review_comments")
+    .select("id, post_id, user_id, resolved_at")
+    .eq("id", commentId)
+    .maybeSingle();
+  return (data as { id: string; post_id: string; user_id: string; resolved_at: string | null } | null) ?? null;
+}
+
+/** Comment author, post owner, or manager deletes a review comment. */
+export async function deleteReviewComment(input: {
+  commentId: string;
+}): Promise<CollaboratorActionResult> {
+  const parsed = CommentIdSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, error: "Invalid comment id." };
+  const { userId, profile } = await requireAuthor();
+  const supabase = await createSupabaseServerClient();
+
+  const comment = await loadReviewComment(supabase, parsed.data.commentId);
+  if (!comment) return { ok: false, error: "Comment not found." };
+  const { access } = await resolvePostAccess(supabase, comment.post_id, userId, profile.role);
+  if (comment.user_id !== userId && !access.isOwner && !access.isManager) {
+    return { ok: false, error: "You can't delete this comment." };
+  }
+
+  const { error } = await supabase
+    .from("post_review_comments")
+    .delete()
+    .eq("id", parsed.data.commentId);
+  if (error) return { ok: false, error: error.message };
+
+  revalidatePath(`/editor/${comment.post_id}`);
+  return { ok: true };
+}
+
+/** Toggle a review comment's resolved state (author / owner / manager). */
+export async function resolveReviewComment(input: {
+  commentId: string;
+}): Promise<CollaboratorActionResult> {
+  const parsed = CommentIdSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, error: "Invalid comment id." };
+  const { userId, profile } = await requireAuthor();
+  const supabase = await createSupabaseServerClient();
+
+  const comment = await loadReviewComment(supabase, parsed.data.commentId);
+  if (!comment) return { ok: false, error: "Comment not found." };
+  const { access } = await resolvePostAccess(supabase, comment.post_id, userId, profile.role);
+  if (comment.user_id !== userId && !access.isOwner && !access.isManager) {
+    return { ok: false, error: "You can't resolve this comment." };
+  }
+
+  const nextResolvedAt = comment.resolved_at ? null : new Date().toISOString();
+  const { error } = await supabase
+    .from("post_review_comments")
+    .update({ resolved_at: nextResolvedAt })
+    .eq("id", parsed.data.commentId);
+  if (error) return { ok: false, error: error.message };
+
+  revalidatePath(`/editor/${comment.post_id}`);
+  return { ok: true };
+}

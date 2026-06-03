@@ -1,6 +1,6 @@
 import "server-only";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import type { AppRole, PostRow, ProfileRow, TagRow } from "@/lib/db/types";
+import type { AppRole, PostCollaboratorRole, PostRow, ProfileRow, TagRow } from "@/lib/db/types";
 
 type PostAuthor = Pick<ProfileRow, "id" | "full_name" | "email" | "avatar_url" | "role">;
 
@@ -168,6 +168,69 @@ export async function listOwnPosts(authorId: string): Promise<PostWithAuthor[]> 
   }
 
   return posts;
+}
+
+/** A post the user collaborates on, tagged with their per-post role. */
+export interface SharedPost extends PostWithAuthor {
+  collaboratorRole: PostCollaboratorRole;
+}
+
+/**
+ * Posts shared WITH this user (they're an invited collaborator, not the
+ * author). Owner-trashed (archived) posts are excluded so a collaborator's
+ * "Shared with me" list never shows posts the owner deleted. RLS already
+ * scopes the post read to collaborators, so this is safe with the user client.
+ */
+export async function listSharedPosts(userId: string): Promise<SharedPost[]> {
+  const supabase = await createSupabaseServerClient();
+  const { data: collabRows, error: collabErr } = await supabase
+    .from("post_collaborators")
+    .select("post_id, role")
+    .eq("user_id", userId);
+  if (collabErr) {
+    console.error("[listSharedPosts:collaborators]", collabErr);
+    return [];
+  }
+  const rows = (collabRows ?? []) as { post_id: string; role: PostCollaboratorRole }[];
+  if (rows.length === 0) return [];
+  const roleByPost = new Map(rows.map((r) => [r.post_id, r.role]));
+
+  const { data, error } = await supabase
+    .from("posts")
+    .select(POST_SELECT)
+    .in(
+      "id",
+      rows.map((r) => r.post_id),
+    )
+    .neq("status", "archived")
+    .order("updated_at", { ascending: false });
+  if (error) {
+    console.error("[listSharedPosts:posts]", error);
+    return [];
+  }
+  return (data ?? []).map((r) => {
+    const post = normalizeRow(r as unknown as Record<string, unknown>);
+    return { ...post, collaboratorRole: roleByPost.get(post.id) ?? "reviewer" };
+  });
+}
+
+export type PostRelationship = "owned" | PostCollaboratorRole;
+export interface EditablePost extends PostWithAuthor {
+  relationship: PostRelationship;
+}
+
+/**
+ * Every post the user can open in the editor: the ones they authored plus the
+ * ones shared with them, each tagged with the relationship. Used where a single
+ * combined list is more convenient than the owner/shared split (e.g. dashboards).
+ */
+export async function listEditablePostsForUser(userId: string): Promise<EditablePost[]> {
+  const [own, shared] = await Promise.all([listOwnPosts(userId), listSharedPosts(userId)]);
+  const owned: EditablePost[] = own.map((p) => ({ ...p, relationship: "owned" as const }));
+  const sharedTagged: EditablePost[] = shared.map((p) => ({ ...p, relationship: p.collaboratorRole }));
+  return [...owned, ...sharedTagged].sort((a, b) =>
+    (b.updated_at ?? "").localeCompare(a.updated_at ?? ""),
+  );
 }
 
 export async function listPostsThisWeek(weekStart: string): Promise<PostWithAuthor[]> {

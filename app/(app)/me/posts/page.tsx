@@ -2,13 +2,14 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireAuthor } from "@/lib/auth/guards";
-import { listOwnPosts } from "@/lib/db/posts";
+import { listOwnPosts, listSharedPosts } from "@/lib/db/posts";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Panel, PanelBody, PanelHeader } from "@/components/portal/Panel";
 import { PostRowActions } from "@/components/blog/PostRowActions";
 import { formatPostDate, formatScheduledLabel } from "@/lib/utils/dates";
 import { isManager } from "@/lib/auth/roles";
+import { COLLAB_ROLE_LABEL } from "@/lib/auth/collaboration";
 
 export const metadata: Metadata = { title: "My posts" };
 export const dynamic = "force-dynamic";
@@ -23,7 +24,7 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "muted" | "succes
 
 export default async function MyPostsPage() {
   const { userId, profile } = await requireAuthor();
-  const posts = await listOwnPosts(userId);
+  const [posts, shared] = await Promise.all([listOwnPosts(userId), listSharedPosts(userId)]);
 
   const live = posts.filter((p) => p.status !== "archived");
   const trashed = posts.filter((p) => p.status === "archived");
@@ -49,7 +50,7 @@ export default async function MyPostsPage() {
         </Button>
       </header>
 
-      {live.length === 0 && trashed.length === 0 ? (
+      {live.length === 0 && trashed.length === 0 && shared.length === 0 ? (
         <Panel>
           <PanelBody className="p-16 text-center">
             <h2 className="font-hero text-xl font-bold uppercase text-portal-text">No transmissions yet</h2>
@@ -112,6 +113,52 @@ export default async function MyPostsPage() {
                 </PanelBody>
               </Panel>
             ) : null,
+          )}
+
+          {/* Shared with me — drafts the user was invited to collaborate on. */}
+          {shared.length > 0 && (
+            <Panel>
+              <PanelHeader>
+                <div className="font-hero text-base font-bold uppercase tracking-tighter text-portal-text">
+                  Shared with me ({shared.length})
+                </div>
+                <div className="text-[10px] uppercase tracking-wider text-portal-text-muted">
+                  Drafts you've been invited to
+                </div>
+              </PanelHeader>
+              <PanelBody className="p-0">
+                <ul className="divide-y divide-portal-border-soft">
+                  {shared.map((p) => {
+                    const isReviewer = p.collaboratorRole === "reviewer";
+                    return (
+                      <li key={p.id} className="flex items-center justify-between gap-3 px-6 py-4">
+                        <div className="min-w-0 flex-1">
+                          <Link
+                            href={`/editor/${p.id}`}
+                            className="font-ui font-bold text-portal-text hover:text-portal-orange"
+                          >
+                            {p.title || "Untitled"}
+                          </Link>
+                          <div className="mt-1 text-[10px] uppercase tracking-wider text-portal-text-muted">
+                            by {p.author?.full_name || p.author?.email || "Unknown"} · updated{" "}
+                            {formatPostDate(p.updated_at)}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={isReviewer ? "secondary" : "default"}>
+                            {COLLAB_ROLE_LABEL[p.collaboratorRole]}
+                          </Badge>
+                          <Badge variant={STATUS_VARIANT[p.status] ?? "secondary"}>{p.status}</Badge>
+                          <Button asChild size="sm" variant="outline">
+                            <Link href={`/editor/${p.id}`}>{isReviewer ? "Review" : "Edit"}</Link>
+                          </Button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </PanelBody>
+            </Panel>
           )}
 
           {/* Trash bin — posts stay here until the author (or an admin) deletes them. */}
