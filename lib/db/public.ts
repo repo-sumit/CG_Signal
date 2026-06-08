@@ -4,6 +4,8 @@ import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import type { PostRow, ProfileRow, TagRow } from "@/lib/db/types";
 import { REACTION_EMOJIS, type ReactionEmoji } from "@/lib/reactions";
 import { teamDisplayOrderFor } from "@/lib/team";
+import { getFirstName } from "@/lib/utils/names";
+import type { PostContributorRole } from "@/lib/db/types";
 
 /**
  * Cache tag for the public-feed queries (listPublicPosts, listPublicTags,
@@ -37,9 +39,24 @@ export { REACTION_EMOJIS, type ReactionEmoji } from "@/lib/reactions";
 
 type PublicAuthor = Pick<ProfileRow, "id" | "full_name" | "email" | "avatar_url" | "role">;
 
+/**
+ * Public-safe contributor shape — NO email or permission data. Drives the
+ * multi-author byline on post detail + the "+N" hint on cards.
+ */
+export interface PublicPostContributor {
+  id: string;
+  firstName: string;
+  fullName: string;
+  avatarUrl: string | null;
+  role: PostContributorRole;
+  displayOrder: number;
+}
+
 export interface PublicPost extends PostRow {
   author: PublicAuthor | null;
   tags: Pick<TagRow, "id" | "name" | "slug">[];
+  /** Owner + editor collaborators, public-safe. Back-filled by `attachContributors`. */
+  contributors: PublicPostContributor[];
   /** Aggregate post_views count — server-computed, never inferred client-side. */
   viewCount: number;
   /** Aggregate reactions count — server-computed across all emojis. */
@@ -90,6 +107,7 @@ function normalize(row: Record<string, unknown>): PublicPost {
         }
       : null,
     tags,
+    contributors: [], // back-filled by `attachContributors`.
     viewCount: 0, // back-filled by `attachViewCounts` after the join.
     reactionCount: 0, // back-filled by `attachEngagementCounts`.
     commentCount: 0, // back-filled by `attachEngagementCounts`.
@@ -138,6 +156,117 @@ async function attachCoverUrls(posts: PublicPost[]): Promise<PublicPost[]> {
     const path = pathById.get(p.cover_media_id);
     const url = path ? (urlByPath.get(path) ?? null) : null;
     return { ...p, coverUrl: url };
+  });
+}
+
+/**
+ * Attaches the public contributor list to each post. Robust by design — it
+ * UNIONS three sources and dedupes by user:
+ *
+ *   1. the post author (always present, role 'owner', even if the
+ *      `post_contributors` store is empty or unsynced),
+ *   2. live editor collaborators from `post_collaborators` (role='editor'),
+ *   3. explicit `post_contributors` rows (the canonical credit store).
+ *
+ * Reviewers are never included. Only `full_name` + `avatar_url` are exposed —
+ * never email. Service-role is used (same as the rest of this file), so RLS
+ * doesn't block the joins; safety comes from the field projection + the
+ * caller pinning `status='published'`.
+ */
+async function attachContributors(posts: PublicPost[]): Promise<PublicPost[]> {
+  if (posts.length === 0) return posts;
+  const service = createSupabaseServiceClient();
+  const postIds = posts.map((p) => p.id);
+
+  const [collabRes, contribRes] = await Promise.all([
+    service.from("post_collaborators").select("post_id, user_id, role").in("post_id", postIds).eq("role", "editor"),
+    service.from("post_contributors").select("post_id, user_id, role, display_order").in("post_id", postIds),
+  ]);
+  const collabRows = (collabRes.data ?? []) as { post_id: string; user_id: string; role: string }[];
+  const contribRows = (contribRes.data ?? []) as {
+    post_id: string;
+    user_id: string;
+    role: string;
+    display_order: number;
+  }[];
+
+  // Collect every profile id we need: authors + collaborator editors + contributors.
+  const userIds = new Set<string>();
+  for (const p of posts) if (p.author_id) userIds.add(p.author_id);
+  for (const r of collabRows) userIds.add(r.user_id);
+  for (const r of contribRows) userIds.add(r.user_id);
+
+  const profById = new Map<string, { full_name: string | null; avatar_url: string | null }>();
+  if (userIds.size > 0) {
+    const { data: profs } = await service
+      .from("profiles")
+      .select("id, full_name, avatar_url")
+      .in("id", [...userIds]);
+    for (const pr of (profs ?? []) as { id: string; full_name: string | null; avatar_url: string | null }[]) {
+      profById.set(pr.id, { full_name: pr.full_name, avatar_url: pr.avatar_url });
+    }
+  }
+
+  const contribByPost = new Map<string, typeof contribRows>();
+  for (const r of contribRows) {
+    const list = contribByPost.get(r.post_id) ?? [];
+    list.push(r);
+    contribByPost.set(r.post_id, list);
+  }
+  const editorsByPost = new Map<string, string[]>();
+  for (const r of collabRows) {
+    const list = editorsByPost.get(r.post_id) ?? [];
+    list.push(r.user_id);
+    editorsByPost.set(r.post_id, list);
+  }
+
+  const toContributor = (
+    userId: string,
+    role: PostContributorRole,
+    displayOrder: number,
+  ): PublicPostContributor => {
+    const prof = profById.get(userId);
+    const fullName = (prof?.full_name ?? "").trim();
+    return {
+      id: userId,
+      firstName: getFirstName(fullName),
+      fullName,
+      avatarUrl: prof?.avatar_url ?? null,
+      role,
+      displayOrder,
+    };
+  };
+
+  const normalizeRole = (role: string): PostContributorRole =>
+    role === "owner" || role === "editor" || role === "contributor" ? role : "contributor";
+
+  return posts.map((post) => {
+    const byUser = new Map<string, PublicPostContributor>();
+
+    // 1. Owner — always first, always present.
+    if (post.author_id) byUser.set(post.author_id, toContributor(post.author_id, "owner", 0));
+
+    // 2. Explicit contributor rows (canonical store) take precedence for non-owners.
+    for (const r of contribByPost.get(post.id) ?? []) {
+      if (r.user_id === post.author_id) continue; // owner already set
+      byUser.set(r.user_id, toContributor(r.user_id, normalizeRole(r.role), r.display_order));
+    }
+
+    // 3. Live editor collaborators fill any gaps the store hasn't captured yet.
+    let order = 10;
+    for (const uid of editorsByPost.get(post.id) ?? []) {
+      if (uid === post.author_id || byUser.has(uid)) continue;
+      byUser.set(uid, toContributor(uid, "editor", order++));
+    }
+
+    const contributors = [...byUser.values()].sort((a, b) => {
+      const ra = a.role === "owner" ? 0 : 1;
+      const rb = b.role === "owner" ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+      if (a.displayOrder !== b.displayOrder) return a.displayOrder - b.displayOrder;
+      return a.firstName.localeCompare(b.firstName);
+    });
+    return { ...post, contributors };
   });
 }
 
@@ -225,7 +354,8 @@ async function listPublicPostsUncached(limit = 30): Promise<PublicPost[]> {
   const posts = (data ?? []).map((r: unknown) => normalize(r as Record<string, unknown>));
   const withViews = await attachViewCounts(posts);
   const withEngagement = await attachEngagementCounts(withViews);
-  return attachCoverUrls(withEngagement);
+  const withCover = await attachCoverUrls(withEngagement);
+  return attachContributors(withCover);
 }
 
 /**
@@ -257,7 +387,8 @@ export async function getPublicPostBySlug(slug: string): Promise<PublicPost | nu
   const [withViews] = await attachViewCounts([post]);
   const [withEngagement] = await attachEngagementCounts([withViews ?? post]);
   const [withCover] = await attachCoverUrls([withEngagement ?? withViews ?? post]);
-  return withCover ?? withEngagement ?? withViews ?? post;
+  const [withContributors] = await attachContributors([withCover ?? withEngagement ?? withViews ?? post]);
+  return withContributors ?? withCover ?? withEngagement ?? withViews ?? post;
 }
 
 async function listPublicTagsUncached(): Promise<{ id: string; name: string; slug: string }[]> {

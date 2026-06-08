@@ -22,6 +22,7 @@ import { ReactionsBar } from "@/components/reactions/ReactionsBar";
 import { PostViewTracker } from "@/components/analytics/PostViewTracker";
 import { PostAnalyticsTracker } from "@/components/analytics/PostAnalyticsTracker";
 import { PostShareButton } from "@/components/posts/PostShareButton";
+import { PostContributorsRow } from "@/components/posts/PostContributorsRow";
 import { SubscribeSection } from "@/components/landing/SubscribeSection";
 import { SubscribeMiniCta } from "@/components/landing/SubscribeMiniCta";
 import { formatPostDate } from "@/lib/utils/dates";
@@ -163,45 +164,56 @@ export default async function PublicPostPage(props: { params: Promise<{ slug: st
             )}
 
             <div className="mt-8 border-y border-portal-border-soft py-4">
-              <div className="flex items-center gap-4">
-                <Avatar
-                  src={post.author?.avatar_url}
-                  name={post.author?.full_name}
-                  email={post.author?.email}
-                  size="lg"
-                />
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-4">
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-ui text-sm font-bold text-portal-text">
-                    {post.author?.full_name || post.author?.email}
-                  </div>
-                  <div className="text-[10px] uppercase tracking-wider text-portal-text-muted">
-                    {roleLabel(post.author?.role)}
-                  </div>
+                  {post.contributors.length > 1 ? (
+                    // Multi-author byline — owner + editor collaborators.
+                    <PostContributorsRow contributors={post.contributors} />
+                  ) : (
+                    // Single author — original byline, unchanged.
+                    <div className="flex items-center gap-4">
+                      <Avatar
+                        src={post.author?.avatar_url}
+                        name={post.author?.full_name}
+                        email={post.author?.email}
+                        size="lg"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-ui text-sm font-bold text-portal-text">
+                          {post.author?.full_name || post.author?.email}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wider text-portal-text-muted">
+                          {roleLabel(post.author?.role)}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <div className="text-right">
-                  <div className="text-[10px] uppercase tracking-wider text-portal-text-muted">
-                    {post.published_at ? formatPostDate(post.published_at) : ""}
+                <div className="flex items-center justify-between gap-4 sm:justify-end">
+                  <div className="text-right">
+                    <div className="text-[10px] uppercase tracking-wider text-portal-text-muted">
+                      {post.published_at ? formatPostDate(post.published_at) : ""}
+                    </div>
+                    <div className="mt-1 inline-flex items-center gap-2 text-[10px] uppercase tracking-wider text-portal-text-muted">
+                      <span className="inline-flex items-center gap-1">
+                        <Eye className="h-3 w-3" /> {post.viewCount} views
+                      </span>
+                      <span aria-hidden className="text-portal-text-soft">·</span>
+                      <span className="inline-flex items-center gap-1">
+                        <Clock className="h-3 w-3" /> {post.read_time_minutes} min read
+                      </span>
+                    </div>
                   </div>
-                  <div className="mt-1 inline-flex items-center gap-2 text-[10px] uppercase tracking-wider text-portal-text-muted">
-                    <span className="inline-flex items-center gap-1">
-                      <Eye className="h-3 w-3" /> {post.viewCount} views
-                    </span>
-                    <span aria-hidden className="text-portal-text-soft">·</span>
-                    <span className="inline-flex items-center gap-1">
-                      <Clock className="h-3 w-3" /> {post.read_time_minutes} min read
-                    </span>
+                  {/* Desktop share — sits right of the meta block. Hidden on
+                      mobile in favour of the full-width row below. */}
+                  <div className="hidden sm:block">
+                    <PostShareButton
+                      postId={post.id}
+                      title={post.title}
+                      slug={post.slug}
+                      authorName={post.author?.full_name ?? post.author?.email ?? null}
+                    />
                   </div>
-                </div>
-                {/* Desktop share — sits right of the meta block, doesn't
-                    crowd the byline. Hidden on mobile in favour of the
-                    full-width row below. */}
-                <div className="hidden sm:block">
-                  <PostShareButton
-                    postId={post.id}
-                    title={post.title}
-                    slug={post.slug}
-                    authorName={post.author?.full_name ?? post.author?.email ?? null}
-                  />
                 </div>
               </div>
               {/* Mobile share — full-width row below the byline. */}

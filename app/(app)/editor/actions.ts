@@ -101,26 +101,57 @@ async function cleanupReviewArtifactsOnPublish(postId: string): Promise<void> {
 }
 
 /**
- * Records public co-author credit when a post goes live: the owner plus every
- * editor collaborator. Reviewers are intentionally excluded. Upsert keyed on
- * (post_id, user_id) so re-publishing never duplicates rows.
+ * Recomputes the canonical public-credit store for a post: the owner (always,
+ * role 'owner') plus every current editor collaborator (role 'editor').
+ * Reviewers are excluded. Stale rows (users no longer owner/editor) are pruned
+ * so removing a collaborator also removes their credit. Idempotent.
+ *
+ * Called on publish AND on every collaborator change so the store stays fresh
+ * even for posts whose collaborators change after they were first published.
+ * (Drafts get rows too, but drafts are never public, so nothing leaks.)
  */
-async function syncContributorsOnPublish(postId: string, ownerId: string): Promise<void> {
+async function syncPostContributors(postId: string): Promise<void> {
   const service = createSupabaseServiceClient();
-  const rows: Array<{ post_id: string; user_id: string; role: string; display_order: number }> = [
-    { post_id: postId, user_id: ownerId, role: "owner", display_order: 0 },
-  ];
-  const { data: editors } = await service
+  const { data: postRow } = await service
+    .from("posts")
+    .select("author_id")
+    .eq("id", postId)
+    .maybeSingle();
+  const ownerId = (postRow as { author_id?: string } | null)?.author_id;
+  if (!ownerId) return;
+
+  const { data: editorRows } = await service
     .from("post_collaborators")
     .select("user_id")
     .eq("post_id", postId)
     .eq("role", "editor");
-  let order = 10;
-  for (const e of (editors ?? []) as { user_id: string }[]) {
-    if (e.user_id === ownerId) continue;
-    rows.push({ post_id: postId, user_id: e.user_id, role: "editor", display_order: order++ });
-  }
+  const editorIds = ((editorRows ?? []) as { user_id: string }[])
+    .map((r) => r.user_id)
+    .filter((id) => id !== ownerId);
+
+  const rows: Array<{ post_id: string; user_id: string; role: string; display_order: number }> = [
+    { post_id: postId, user_id: ownerId, role: "owner", display_order: 0 },
+    ...editorIds.map((uid, i) => ({
+      post_id: postId,
+      user_id: uid,
+      role: "editor",
+      display_order: 10 + i,
+    })),
+  ];
   await service.from("post_contributors").upsert(rows, { onConflict: "post_id,user_id" });
+
+  // Prune rows for users who are no longer the owner or an editor.
+  const keep = new Set<string>([ownerId, ...editorIds]);
+  const { data: existing } = await service
+    .from("post_contributors")
+    .select("user_id")
+    .eq("post_id", postId);
+  const stale = ((existing ?? []) as { user_id: string }[])
+    .map((r) => r.user_id)
+    .filter((uid) => !keep.has(uid));
+  if (stale.length > 0) {
+    await service.from("post_contributors").delete().eq("post_id", postId).in("user_id", stale);
+  }
 }
 
 export async function savePost(input: SavePostInput): Promise<SavePostResult> {
@@ -411,11 +442,10 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   // these have already run). The owner of record is the existing author, or
   // the caller for a brand-new post.
   if (desiredStatus === "published" && postId && !isCollaboratorEdit) {
-    const ownerId = existing?.author_id ?? userId;
     // Draft review comments + the edit lock must not survive into a live post.
     await cleanupReviewArtifactsOnPublish(postId);
     // Public co-author credit (owner + editor collaborators).
-    await syncContributorsOnPublish(postId, ownerId);
+    await syncPostContributors(postId);
     // Per-post newsletter — fired once when a post becomes "published". The DB
     // column newsletter_sent_at gates duplicates so re-saves never re-send.
     // Fire-and-forget: never block the editor on the email round-trip. The
@@ -693,6 +723,8 @@ export async function inviteCollaborator(input: {
     }
     return { ok: false, error: error.message };
   }
+  // Keep the public-credit store in sync (editor invites become contributors).
+  await syncPostContributors(postId);
   revalidatePath(`/editor/${postId}`);
   revalidatePath("/me/posts");
   return { ok: true };
@@ -725,6 +757,8 @@ export async function removeCollaborator(input: {
   if (error) return { ok: false, error: error.message };
   // Free their edit lock so a removed editor can't keep the post locked.
   await supabase.from("post_edit_locks").delete().eq("post_id", postId).eq("locked_by", targetId);
+  // Drop their public credit (removed collaborators are no longer contributors).
+  await syncPostContributors(postId);
 
   revalidatePath(`/editor/${postId}`);
   revalidatePath("/me/posts");
@@ -761,6 +795,8 @@ export async function updateCollaboratorRole(input: {
   if (role === "reviewer") {
     await supabase.from("post_edit_locks").delete().eq("post_id", postId).eq("locked_by", targetId);
   }
+  // Role change flips public credit (editor ⇄ reviewer adds/removes contributor).
+  await syncPostContributors(postId);
 
   revalidatePath(`/editor/${postId}`);
   revalidatePath("/me/posts");
