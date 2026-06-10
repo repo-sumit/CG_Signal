@@ -1,732 +1,1213 @@
 # CG SIGNAL — ConveGenius Team Blog Newsletter
 
 > A retro-futuristic internal blog + newsletter for the ConveGenius.ai team.
-> Public reading, private editing, Mon–Fri publishing cadence, per-post
-> newsletter delivery, soft-deletes, comments, reactions, contributor profiles,
-> OG-safe social previews, structured discovery metadata, rate-limited public
-> writes, Sentry observability, light/dark theming, and a five-person editor
-> allowlist — built on Next.js 16 + React 19 + Supabase + Resend.
+> Public reading, private editing, Mon–Fri publishing cadence, real-time
+> collaborative draft editing with edit-locking, per-post newsletter delivery,
+> soft-deletes, comments, reactions, contributor bylines, OG-safe social
+> previews, structured discovery metadata, rate-limited public writes, Sentry
+> observability, light/dark theming, and a five-person editor allowlist —
+> built on Next.js 16 + React 19 + Supabase + Resend.
 
 **Production:** [convegenius-blog.vercel.app](https://convegenius-blog.vercel.app)
 
 ---
 
-## Table of contents
+## Table of Contents
 
-1. [Product summary](#1-product-summary)
-2. [Feature inventory](#2-feature-inventory)
-3. [Access-control model](#3-access-control-model)
-4. [Tech stack](#4-tech-stack)
-5. [Architecture](#5-architecture)
-6. [Route map](#6-route-map)
-7. [Database schema](#7-database-schema)
-8. [Server actions & API routes](#8-server-actions--api-routes)
-9. [Caching strategy](#9-caching-strategy)
-10. [Newsletter pipeline](#10-newsletter-pipeline)
-11. [Media pipeline](#11-media-pipeline)
-12. [Design system](#12-design-system)
-13. [Theming](#13-theming)
-14. [Local development](#14-local-development)
+1. [Product Overview](#1-product-overview)
+2. [Key Capabilities](#2-key-capabilities)
+3. [Tech Stack](#3-tech-stack)
+4. [Architecture Overview](#4-architecture-overview)
+5. [File and Folder Structure](#5-file-and-folder-structure)
+6. [Database Schema](#6-database-schema)
+7. [Environment Variables](#7-environment-variables)
+8. [Setup Instructions](#8-setup-instructions)
+9. [Available Scripts / Commands](#9-available-scripts--commands)
+10. [API Documentation](#10-api-documentation)
+11. [User Roles and Permissions](#11-user-roles-and-permissions)
+12. [Core User Flows](#12-core-user-flows)
+13. [Feature Limitations and Known Gaps](#13-feature-limitations-and-known-gaps)
+14. [Testing](#14-testing)
 15. [Deployment](#15-deployment)
-16. [Environment variables](#16-environment-variables)
-17. [Operations playbook](#17-operations-playbook)
-18. [Known limitations](#18-known-limitations)
-19. [Future scope](#19-future-scope)
-20. [Troubleshooting](#20-troubleshooting)
-21. [Docs index](#docs-index)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Contribution Guidelines](#17-contribution-guidelines)
+18. [Operations Playbook](#18-operations-playbook)
+19. [Future Scope](#19-future-scope)
+20. [Docs Index](#20-docs-index)
 
 ---
 
-## 1. Product summary
+## 1. Product Overview
 
 ### Problem
-The ConveGenius.ai team wants a lightweight place to publish daily work
-updates that's better than a Slack thread and lighter than a wiki —
-searchable, archived, on a rotating Mon–Fri schedule, visible to the whole
-team and any internal teammate who wants to read, and capable of pushing
-each new post directly to subscribers' inboxes without a separate
-newsletter tool.
+
+The ConveGenius.ai team needs a lightweight place to publish daily work updates that's better than a Slack thread and lighter than a wiki — searchable, archived, on a rotating Mon–Fri schedule, visible to the whole team and any internal teammate who wants to read, capable of collaborative authoring, and able to push each new post directly to subscribers' inboxes without a separate newsletter tool.
 
 ### Solution
-A public-read / private-write blog with a five-person editor rotation and
-an integrated transactional newsletter. Everyone can read; only the five
-approved teammates can post. Anyone with a Google account can comment and
-react. Any visitor can subscribe to get future posts delivered the moment
-they publish.
+
+A public-read / private-write team blog with a five-person editor rotation, a built-in collaborative drafting system (invite-based editor/reviewer roles, one-person-at-a-time edit locking, draft review comments), and an integrated transactional newsletter. Everyone can read; only approved teammates can post. Anyone with a Google account can comment and react. Any visitor can subscribe to get future posts delivered the moment they publish.
 
 ### Audience
-- **5 approved editors** (Aditya + Sumit admins, Om + Insha + Aryan authors)
-- **Internal `@convegenius.ai` readers** — full read access without signing in
-- **External readers** (cross-team partners, vendors, public) — full read access without signing in
-- **Comment/reaction users** — any Google account (`@gmail.com`, `@convegenius.ai`, etc.)
-- **Newsletter subscribers** — any email, single opt-in, per-post delivery
+
+| Who | Access |
+|---|---|
+| 5 approved editors | Full write access; Aditya + Sumit as managers, Om + Insha + Aryan as authors |
+| Internal `@convegenius.ai` readers | Full public read access without signing in |
+| External readers (partners, public) | Full public read access without signing in |
+| Any Google account | Comment, react, subscribe |
+| Newsletter subscribers | Per-post email delivery; any email address |
 
 ### Non-goals
+
 - Not a public CMS — the editor allowlist is hard-pinned to 5 emails.
-- Not a growth-marketing site — public reader pages are indexable, but
-  editor/admin/API/auth surfaces are blocked in `robots.ts` and non-canonical
-  Vercel hosts are 308-redirected to the production domain.
-- Not a federation hub — no API for external systems to post on behalf of users.
-- Not a long-form discussion forum — comments are 100-char plain text, not threaded.
+- Not a growth-marketing site — editor/admin/API/auth surfaces are excluded from `robots.txt` and non-canonical Vercel preview hosts 308-redirect to production.
+- Not a real-time presence platform — edit locking is optimistic with a 5-minute heartbeat, not Y.js/WebSocket-based.
+- Not a discussion forum — comments are 100-character plain text, not threaded.
 
 ---
 
-## 2. Feature inventory
+## 2. Key Capabilities
 
-### Public reading (no login)
-- **Landing page** at `/` — hero, live cadence readout, search box, channel/tag filter pills, section running-heads, fluid post grid with a `Latest` badge, contributor crew section, subscribe block, footer
-- **Post detail** at `/posts/[slug]` — sanitized rich-text body, author byline with avatar + role, view count, read time, reaction bar, comment thread, mid-article + bottom subscribe blocks, related posts grid, share button (Web Share API + clipboard fallback)
-- **Search** — `?q=` matches against title + excerpt in memory (the catalog is small)
-- **Channel filter** — `?tag=<slug>` filters the grid; both filters compose
-- **Fluid responsive grid** — auto-fit columns based on container width (≥320 px floor per card), reflows on browser zoom without snap-breakpoints
-- **Stable Open Graph + Twitter cards** — `/api/og-image/[slug]` proxy 302-redirects to a fresh signed cover URL every crawler hit, so WhatsApp / LinkedIn / Slack / Twitter previews never break when the underlying signed URL rotates
-- **Structured discovery metadata** — `/sitemap.xml` lists home, the archive alias, and published post URLs; `/robots.txt` allows public reader pages while disallowing private surfaces; post pages emit `BlogPosting` JSON-LD
-- **Brand fallback image** — `/og-default.png` for posts without a cover
+### Public Reading (no login required)
+
+- **Landing page** (`/`) — hero, search box, channel/tag filter pills, fluid post grid, contributor crew section, subscribe block
+- **Post detail** (`/posts/[slug]`) — sanitized rich-text body, multi-author byline with avatars, view count, read time, reaction bar, comment thread, mid-article + bottom subscribe CTAs, related posts, share button
+- **Stable Open Graph previews** — `/api/og-image/[slug]` proxy re-signs the cover URL on every crawler hit so WhatsApp/LinkedIn/Slack/Twitter cards never break when Supabase signed URLs rotate
+- **Dynamic sitemap + robots** — `/sitemap.xml` lists all published posts; `/robots.txt` allows reader pages while disallowing private surfaces; `BlogPosting` JSON-LD structured data on post pages
+- **Search** — `?q=` matches title + excerpt in memory
+- **Tag filter** — `?tag=<slug>` composes with search; both update the grid live
 - **Live engagement counts** on cards — views (👁), reactions (❤️), comments (💬)
-- **Trailing first-name byline** — `…  6👁  2❤️  3💬                Insha` keeps the card scannable
-- **Reading-experience nicety** — drafts and scheduled posts return 404; never leaked to public callers
-- **Social preview testing endpoints** — direct-fetchable `/api/og-image/[slug]` for Facebook / LinkedIn / Twitter validator tools
-- **Canonical host enforcement** — preview / generated Vercel hosts redirect to `NEXT_PUBLIC_APP_URL`, keeping cookies, shared links, and social previews pinned to one origin
+- **Co-author byline** — when a post has multiple contributors, `PostContributorsRow` shows each person's avatar, first name, and role (Owner / Editor / Contributor)
 
 ### Authentication
+
 - **Google OAuth** (any Google account — Workspace, Gmail, ConveGenius)
-- **Magic link** email sign-in (Supabase Auth's built-in email sender or Resend if SMTP configured)
-- **Login page** at `/login` — split layout, hero + form, mobile-stacked
-- **Auth callback** at `/api/auth/callback` — bootstraps a `profiles` row on first sign-in
-- **Sign-out** at `/api/auth/signout` — clears the Supabase session cookie + redirects to `/login`
-- **Unauthorized page** at `/unauthorized` — shown to non-editors who hit editor routes; reason-coded via `?reason=`
-- **No domain block** for the comment/react audience — gating happens at the editor tier
-- **Pre-hydration session** via Supabase SSR cookies — pages load with the user's session already resolved server-side
+- **Magic-link** email sign-in via Supabase Auth
+- Login page at `/login`; auth callback bootstraps a `profiles` row on first sign-in
+- **No domain block** for comment/react audience — gating happens at the editor tier
 
 ### Engagement (any signed-in user)
-- **6-reaction bar** — Like / Love / Funny / Celebrate / Watching / Launch use accessible Lucide icon buttons while preserving the emoji keys (`👍 ❤️ 😂 🎉 👀 🚀`) in the database; multi-react allowed; tap again to remove
-- **Optimistic UI** for reactions — toggle reflects instantly, server reconciles
-- **Plain-text comments** — 100-char body limit, soft-deletable, live counter with red/yellow/green tone
-- **Soft-delete** — comment author + post author + admins can delete; deleted rows excluded by reads
-- **Trash semantics** — `deleted_at` + `deleted_by` columns preserve audit trail
-- **Sign-in CTA** for anonymous visitors on the post page (clicking reaction/comment input prompts sign-in)
 
-### Writing (5-person editor allowlist)
-- **TipTap rich-text editor** at `/editor/new` (alias `/transmit`) and `/editor/[id]`
-- **Lazy editor bundle** — `PostEditorLoader` keeps TipTap and custom extensions out of non-editor routes and shows an authenticated skeleton while the editor chunk loads client-side
-- **Three-button publish workflow** — Save Draft / Schedule Post / Post Now (or Submit for Review when manager review is enabled)
-- **Status workflow** — `draft → submitted (optional) → scheduled → published → archived`
-- **Server autosave** every 15 s of inactivity
-- **Local draft backup** every 3 s to `localStorage` (key: `cg_signal_draft_${postId || "new"}`) — survives tab crashes; restore-prompt banner on next mount when the local snapshot is newer than the server copy
-- **Word + read-time counters** in the editor chrome (220 wpm baseline)
-- **Sticky toolbar** — pinned to the viewport while scrolling through long drafts
-- **Rich-text features** — bold / italic / underline / strike / highlight / inline-code, H2/H3/H4 headings, bullet / numbered / task lists, blockquote, code blocks, links, text color, horizontal rule, undo / redo, clear formatting
-- **Smart-paste from Google Docs / Word / Notion** — `sanitizePastedHtml` strips vendor classes, layout cruft, oversized fonts before TipTap parses
-- **Paste-to-embed** — a bare YouTube / Vimeo / Loom / Google Drive URL becomes a typed embed node instead of a raw link
-- **Per-post tags** — manager-curated tag catalogue + author shortcut to create new tags inline (server validates + dedupes)
-- **Cover image picker** — choose from post media OR upload a new image; thumbnail goes to the `blog-media` Supabase bucket
-- **Scheduled publishing** — calendar/time picker, 09:00 UTC default slot, modal validation
-- **Revert to draft** — single click un-publishes a published or scheduled post and clears the schedule
-- **Weekly template** — load a starter outline (`WEEKLY_TEMPLATE`) into a fresh draft
-- **Body media inserts** — image / video / audio uploaded via **direct browser → Supabase Storage** (`lib/media/direct-upload.ts`), bypassing Vercel's 4.5 MB function payload limit; the API only registers metadata after upload and enforces ownership, MIME, size, and rate-limit checks
-- **External video embeds** — YouTube, Vimeo, Loom, Google Drive (sandbox-allowlisted iframes via `EmbedBlock` Node extension)
-- **HTML sanitizer** (`lib/editor/sanitize.ts`) — strips scripts / event handlers / `javascript:` URLs; gates iframes to the embed allow-list; sets `referrerpolicy="strict-origin-when-cross-origin"` so unlisted YouTube videos don't trip error 153
-- **Server-action serialization safety** — TipTap JSON is `JSON.parse(JSON.stringify(...))`'d before crossing the Server Action boundary so non-prototype-clean nodes don't trip Next's serializer
+- **6-reaction bar** — Like / Love / Funny / Celebrate / Watching / Launch; multi-react allowed; optimistic UI
+- **Plain-text comments** — 100-char body limit, soft-deletable with audit trail
+- **Sign-in CTA** for anonymous visitors when they tap reaction/comment inputs
 
-### Engagement metrics — server side
-- **Per-post view tracking** — `PostViewTracker` client component fires once per session per post (30-min throttle) into `/api/analytics/post-view` → inserts a row into `post_views`
-- **Vercel Analytics** event `post_view` on every navigation (deduped client-side)
-- **Aggregate counts** stitched onto every public post via `attachViewCounts` + `attachEngagementCounts` in `lib/db/public.ts` — two batched Supabase round-trips regardless of list size
+### Writing & Editing (5-person allowlist)
 
-### Newsletter (Resend integration)
-- **Single opt-in subscribe form** on landing + on every public post page (bottom + mid-article inline CTA on long posts)
-- **Subscribe rate limit** — optional Upstash Redis sliding-window limiter caps subscribe attempts at 5 / minute per IP and returns standard `X-RateLimit-*` headers on 429 responses
-- **Compact subscribe variant** on post pages — same component, drops the gradient halo so it reads as editorial rather than marketing
-- **Contributor-hide** — logged-in authors/managers don't see the subscribe blocks on post pages (they drive the newsletter, no need to pitch it)
-- **Mid-article CTA** — server-side split of sanitized article HTML at the paragraph break closest to ~55% of the document; gated on ≥400 words + ≥4 break points so short posts never get it
-- **Smooth-scroll + focus** — clicking the inline CTA scrolls the bottom subscribe section into view and focuses its email input
-- **Per-post newsletter delivery** — when a post is published (Post Now OR scheduled-publish cron), `sendPerPostNewsletter` fans out a per-recipient email with thumbnail + title + excerpt + first paragraph + "Read more" button
-- **Idempotent send** — conditional `UPDATE posts SET newsletter_sent_at = now() WHERE id = $1 AND newsletter_sent_at IS NULL` guarantees retries / double-runs never duplicate mail
-- **Resend sandbox detection** — when `RESEND_FROM` is `onboarding@resend.dev`, only the Resend-account owner gets delivery; surfaced clearly in `/api/admin/newsletter-diagnostics`
-- **Welcome email** — sent on subscription via `welcomeTemplate`, with `List-Unsubscribe` + `List-Unsubscribe-Post: One-Click` headers per RFC 8058 (Gmail / Yahoo / Outlook bulk-sender compliance)
-- **One-click unsubscribe** — `/api/subscribe/unsubscribe?t=<token>` shows a confirm page, POST confirms, success page links back to newsletter
-- **Status reactivation** — re-subscribing after unsubscribe clears `unsubscribed_at` and rotates the unsubscribe token; old unsubscribe links stop working
-- **Already-subscribed handling** — friendly "you are already subscribed" toast, no duplicate welcome
-- **Subscriber privacy** — never exposed to the public reader; only the manager-only `/admin/subscribers` page reads the table; row-level security on the table + service-role-only access
-- **Analytics events** — `subscribe_cta_view` (impression), `subscribe_submit`, `subscribe_success` — all tagged with `placement: landing | post_end | mid_article` + `postSlug`
+- **TipTap rich-text editor** with full formatting, heading levels, lists, code blocks, links, text color, horizontal rule
+- **Smart paste** — strips Google Docs / Word / Notion vendor classes; bare YouTube/Vimeo/Loom URLs auto-become embedded nodes
+- **Per-post tags, cover image picker, excerpt, and schedule picker**
+- **Three-button publish flow** — Save Draft / Schedule Post / Post Now (or "Submit for Review" when manager-review mode is enabled)
+- **Status lifecycle** — `draft → submitted (optional) → scheduled → published → archived`
+- **Server autosave** every 15 seconds of inactivity + **localStorage backup** every 3 seconds (crash-resilient restore banner)
+- **Word + read-time counters** (220 wpm baseline)
+- **Sticky toolbar** — stays pinned while scrolling long drafts
 
-### Sharing
-- **PostShareButton** — Web Share API on supported devices (mobile iOS / Android), copy-to-clipboard fallback elsewhere
-- **Hover-checked state** — green border + checkmark toast for 1.5 s after copy
-- **Stable URL** — `${NEXT_PUBLIC_APP_URL}/posts/${slug}` (no tracking parameters)
-- **Desktop placement** — sits right of the byline metadata
-- **Mobile placement** — full-width row below the byline
+### Collaborative Drafting
 
-### Soft-delete + retention (planned 30-day cron)
-- **Soft delete** — `status = 'archived'` + `archived_at` timestamp; reversible
-- **Trash bin** at `/me/posts` — shows archived posts with a restore button
-- **Restore** — returns the post to `draft` (publish flow re-triggers from scratch)
-- **Permanent delete** — admin-only or author-on-archived; cascade-removes `post_tags`; `media_assets.post_id` becomes `null` via `on delete set null` so orphaned media is harmless
+- **Invite collaborators** — post owner can invite approved team members as `editor` (can edit content) or `reviewer` (read-only with review comments)
+- **One-person-at-a-time edit lock** — 5-minute TTL, 60-second heartbeat via `sendBeacon`/keepalive; the editor shows who holds the lock; owner/manager can force-release
+- **Lock banners** — "Locked by [name]" banner with a Take Over button; "You are editing" / "Reviewer mode" status banners
+- **Draft review comments** — reviewers (and collaborating editors) can leave ≤500-char thread comments; comments can be resolved/reopened; all review comments and locks are cleaned up on publish
+- **"Shared with me" section** — collaborators see the posts they've been invited to in `/me/posts` under a dedicated Shared with Me panel with role badges
+- **Contributor credit** — post contributors (owner + editors) are persisted to `post_contributors` and shown in the public co-author byline; credit is synced on every invite/remove/role-change and on publish; removed editors lose public credit
 
-### Five-day weekly schedule
-- **One author per weekday** (Mon–Fri) — manager assigns days via `/admin/schedule`
-- **Today's author** card on the dashboard — name + their assigned day + posted/not-yet-posted badge
-- **Conflict-detection** — assigning a day already owned forces the manager to clear the old owner first
-- **Audit log** — every schedule change is recorded in `audit_logs` (best-effort)
+_Limitations: lock is advisory-only at the DB layer (enforced in the write path, not RLS); real-time presence is heartbeat-based, not WebSocket._
 
-### View as member
-- Toggle in the top nav lets editors browse as a viewer
-- Persisted in an HTTP-only `cg_view_mode` cookie (24h TTL)
-- All editor/admin UI elements hide; protected routes redirect to `/dashboard`
-- Sticky yellow banner across the top while active; one-click exit
-- Anti-bypass — server guards check the cookie before letting editors into editor surfaces
+### Newsletter
+
+- **Single opt-in** — subscribe form on landing page and on every post (bottom + mid-article on long posts)
+- **Per-post newsletter delivery** — on publish, fans out a per-recipient email with thumbnail + title + excerpt + first paragraph
+- **Idempotent send** — `newsletter_sent_at` guard prevents duplicate sends on retries
+- **One-click unsubscribe** — RFC 8058-compliant `List-Unsubscribe` headers; token-based confirm/apply pages
+- **Resend sandbox detection** — auto-detected; surfaced in `/api/admin/newsletter-diagnostics`
+- **Rate-limited** — 5 subscribe attempts / 60s per IP when Upstash is configured
 
 ### Admin
-- `/admin` — landing with stat tiles (team size, published this week, awaiting review, all drafts) + section nav
-- `/admin/schedule` — drag-free weekday assignment
-- `/admin/users` — manage the `authorized_users` allowlist with self-lockout + last-admin guards
-- `/admin/tags` — curate the tag library (duplicate detection by name + slug)
-- `/admin/analytics` — completion %, posts per author, missed days, total/today/7d post views, top 5 posts, engagement-by-post table, audience mix (logged-in vs anonymous), active subscriber count
-- `/admin/subscribers` — manager-gated table of every newsletter signup with status (active/unsubscribed), source, signup date, unsubscribe date; server-side email search + status filter pills; capped at 500 rows
-- `/admin/newsletter-diagnostics` — debug endpoint surfacing Resend config, sandbox state, last delivery error
 
-### Runtime safety + observability
-- **Boot-time env validation** — `instrumentation.ts` warns in development, refuses broken production boots when required env vars are missing, and enforces a minimum-length `CRON_SECRET`
-- **Sentry for browser/server/edge** — client, server, and edge configs initialize only when DSNs are present; Server Component / route-handler errors flow through `onRequestError`
-- **Sentry tunnel** — `next.config.mjs` proxies browser events through `/monitoring` to reduce ad-blocker drops; source-map upload is enabled when Sentry org/project/auth env vars exist
-- **Global security headers** — every route gets `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, strict-origin referrer policy, and a restrictive Permissions Policy
-- **Public write rate limits** — `lib/ratelimit.ts` protects newsletter subscribe and authenticated media-registration endpoints when Upstash REST credentials are configured
+- `/admin` — stats tiles (team size, published this week, awaiting review, all drafts), section nav
+- `/admin/schedule` — Mon–Fri weekday assignment; conflict detection
+- `/admin/users` — allowlist CRUD with self-lockout + last-admin guards
+- `/admin/tags` — tag library with duplicate detection
+- `/admin/analytics` — completion %, per-author metrics, top posts, engagement table, audience mix (logged-in vs anonymous), subscriber count
+- `/admin/subscribers` — manager-gated signups table with search + status filter
+- `/api/admin/newsletter-diagnostics` — Resend config debug endpoint
 
-### Contributors section
-- Public `/#contributors` block on the landing page
-- **Stable order** — `TEAM_META.displayOrder` in `lib/team.ts` is the single source of truth (Aditya → Sumit → Om → Insha → Aryan); applied in `listContributorStats` AND `listTeam` so admin schedule / dashboard / analytics all match
-- **Rich card** per contributor — avatar, name, designation, POD/team, role badge, LinkedIn + GitHub icon links (GitHub only renders when set), topic chips, post count, latest-post tile
-- **Topic auto-derive** — top 4 tags by frequency across their published posts; falls back to manual `topics` array when no posts exist
-- **Latest-post tile** — title + date in a hover-flat panel; arrows to the post detail page
-- **No-publish fallback** — "No transmissions yet" pill instead of a hard-empty card
-- **Stable identity badges** — Senior PM / Product Associate / Senior UI/UX Designer / Design Intern / Product Intern
+### Analytics
 
-### Dashboard (editors)
-- `/dashboard` — author command-center
-- **Today's author** highlight if it's a weekday
-- **Week-at-a-glance** table — Mon–Fri rows, who owns the day, their status
-- **Completion %** for the current week
-- **Quick links** — Save Draft / New Transmission / View Schedule
+- **Per-post view tracking** — session-deduplicated (30-min window), captures device, browser, OS, geo, viewport, scroll depth, read complete flag
+- **Event tracking** — `post_view`, `subscribe_cta_view`, `subscribe_submit`, `subscribe_success`, scroll-depth, react events
+- **Per-author and per-post analytics** — completion rates, engagement tables in `/admin/analytics`
+- **Vercel Analytics + Speed Insights** — web vitals and page-view telemetry
 
-### My Posts
-- `/me/posts` (alias `/my-posts`) — author's own posts with status badges, edit links, soft-delete button
-- **Trash bin** at the bottom — archived posts + restore + permanent delete (with retention countdown when the cron exists)
+### Design System
+
+- **Retro-futuristic editorial OS** aesthetic — monospace UI text, strong outlines, sparing accent colors
+- **Pre-hydration theme script** — no flash of wrong colors; light default for first-time visitors
+- **Light / dark toggle** — explicit user preference persisted in localStorage; instant CSS-variable swap without React re-render
+- **Responsive grid** — auto-fit columns, `clamp` fluid gaps, `min-w-0` on all flex children; mobile-first throughout
 
 ---
 
-## 3. Access-control model
+## 3. Tech Stack
 
-Two-tier role. The DB enum is `viewer | author | manager`; the UI surfaces `manager` as **"Admin"** (`roleLabel()` helper).
-
-### Tier 1 — Public reading
-- Routes: `/`, `/posts/[slug]`, `/login`, `/unauthorized`, `/api/auth/callback`, `/api/media/file`, `/api/og-image/[slug]`, `/api/subscribe`, `/api/subscribe/unsubscribe`, `/og-default.png`, `/cg.png`
-- No session required
-- All publicly readable data is fetched through the **service-role client** in `lib/db/public.ts` with a hard `status = 'published'` pin
-
-### Tier 2 — Authenticated commenter / reactor
-- Any Google account passes
-- On first sign-in, `profiles` row bootstraps with `role = 'viewer'` (or the allowlist role if the email matches)
-- Permissions:
-  - Comment on published posts (≤ 100-char body, plain text)
-  - React (one of each of 6 emojis)
-  - Delete their own comments
-  - Subscribe / unsubscribe to the newsletter
-  - **Cannot** access `/dashboard`, `/me/posts`, `/editor/*`, `/admin/*` — redirected to `/unauthorized?reason=editor`
-
-### Tier 3 — Approved editor (5 emails)
-
-| Email | Role | Day |
+| Layer | Choice | Notes |
 |---|---|---|
-| aditya.c@convegenius.ai | Admin (manager) | — |
-| sumit.kumar@convegenius.ai | Admin (manager) | — |
-| om.kumar@convegenius.ai | Author | — |
-| insha.naseem@convegenius.ai | Author | — |
-| aryan.singh@convegenius.ai | Author | — |
+| Framework | **Next.js 16 (App Router)** | Server components, server actions, ISR, dynamic params as `Promise` |
+| UI runtime | **React 19** | Client components only for interactive surfaces |
+| Language | **TypeScript 5 (strict)** | `noUncheckedIndexedAccess`, no `any` allowed |
+| Database | **Supabase Postgres** | RLS native, free tier, easy migrations, security-definer helpers |
+| Auth | **Supabase Auth** | Google OAuth + magic-link; SSR cookie handling via `@supabase/ssr` |
+| Storage | **Supabase Storage** | Private `blog-media` bucket; direct browser uploads; per-request re-signing |
+| Editor | **TipTap v2** | JSON-first, extensible; custom `AudioBlock`, `VideoBlock`, `EmbedBlock` nodes |
+| Styling | **Tailwind CSS 3 + CSS variables** | Atomic + design-system tokens; `data-theme` dark/light |
+| Fonts | **next/font** | Orbitron (hero), Space Mono (UI); self-hosted, no FOUT |
+| Validation | **Zod** | Single schema for both action input and runtime checks |
+| Notifications | **Sonner** | Lightweight accessible toasts |
+| Icons | **lucide-react** | Tree-shakeable |
+| Transactional email | **Resend** | REST API, RFC 8058 headers, sandbox/verified-domain modes |
+| Hosting | **Vercel** | Auto-deploy from `main`; cron jobs; edge runtime |
+| Product analytics | **Vercel Analytics + Speed Insights** | SSR-safe, no tracking pixels |
+| Error monitoring | **Sentry for Next.js v10** | Browser/server/edge capture; `/monitoring` tunnel for ad-blockers |
+| Rate limiting | **Upstash Redis** | Sliding-window limiter; graceful no-op when env vars missing |
+| Testing (unit) | **Vitest + jsdom** | 9 test files, 48 assertions |
+| Testing (e2e) | **Playwright** | Against deployed/staging instance |
+| Form handling | **react-hook-form + @hookform/resolvers** | Used in admin panels |
 
-- Authors: create / edit / delete their own posts; upload their own media; delete comments on their own posts
-- Admins: everything authors can do + manage all posts; manage allowlist, schedule, tags, subscribers; delete any comment; hard-delete archived posts; access `/admin/*`
-
-### Enforcement layers (defense in depth)
-1. **Next proxy + middleware helper** (`proxy.ts` → `lib/supabase/middleware.ts`) refreshes Supabase SSR cookies, canonicalizes the host, and gates non-public routes by session presence; the `PUBLIC_PATHS` list scopes which routes anonymous traffic can reach
-2. **Page guards** (`lib/auth/guards.ts`) — `requireAuthor()` / `requireManager()` redirect non-editors to `/unauthorized?reason=editor`
-3. **Server actions** — every action begins with Zod-validated input + a `requireSession()` / `requireAuthor()` / `requireManager()` call
-4. **Supabase RLS** — defense in depth on every public table; helper functions are `security definer` with locked `search_path`
-5. **Service-role isolation** — `SUPABASE_SERVICE_ROLE_KEY` is only read inside `lib/supabase/server.ts → createSupabaseServiceClient()`; never reaches the browser bundle
-6. **Editor allowlist** — `authorized_users` table is the source of truth; bootstrap trigger consults it on profile creation
-
----
-
-## 4. Tech stack
-
-| Layer | Choice | Why |
-|---|---|---|
-| Framework | **Next.js 16 (App Router)** | Server components + server actions + ISR; `proxy.ts` auth/canonical-host gate |
-| UI runtime | **React 19** | current app-router runtime + client components for editor, comments, reactions, subscribe, and theme UI |
-| Language | **TypeScript (strict)** | catches half the bugs at compile time; no `any` allowed |
-| Database | **Supabase Postgres** | free tier covers a 5-person team; RLS native; easy migrations |
-| Auth | **Supabase Auth** (Google OAuth + magic link) | works with Workspace + Gmail; no separate identity provider |
-| Storage | **Supabase Storage** (private `blog-media` bucket) | signed URLs, RLS-gated; direct browser uploads sidestep Vercel function payload caps |
-| Editor | **TipTap v2** | extensible, JSON-first, secure round-trip; custom AudioBlock/VideoBlock/EmbedBlock extensions |
-| Styling | **Tailwind CSS** + custom CSS-variable theme tokens | atomic + design-system-aware; light/dark theme swap without React rerenders |
-| Fonts | **next/font** — Orbitron (hero), Space Mono (UI) | self-hosted, no FOUT |
-| Validation | **Zod** | one schema for the action input + the runtime check |
-| Notifications | **Sonner** | tiny, themeable, accessible toasts |
-| Icons | **lucide-react** | tree-shakeable, consistent |
-| Transactional email | **Resend** | lightweight REST wrapper, RFC 8058 headers, sandbox / verified domain modes |
-| Hosting | **Vercel** | free tier; cron jobs; edge analytics; serverless functions |
-| Product telemetry | **Vercel Analytics** + **Speed Insights** | event tracking + web-vitals; SSR-safe; no tracking pixels |
-| Error monitoring | **Sentry for Next.js** | browser/server/edge capture, request-error hook, optional source maps, `/monitoring` tunnel |
-| Rate limiting | **Upstash Redis** (`@upstash/ratelimit`) | sliding-window limits for public subscribe + authenticated media-registration endpoints |
-| Tests | **Vitest** (unit) + **Playwright** (e2e) | unit for utilities, Playwright for the auth flow |
-
-No SWR / React Query. The app is overwhelmingly server-rendered; ISR + `unstable_cache` + tag invalidation (`updateTag` from server actions, `revalidateTag` from cron route handlers) provide the stale-while-revalidate pattern at the server boundary. See `docs/frontend-cache-audit.md` for the full reasoning.
+No SWR / React Query — server components + ISR + `unstable_cache` + tag invalidation covers the SWR pattern at the server boundary. See `docs/frontend-cache-audit.md` for the full rationale.
 
 ---
 
-## 5. Architecture
+## 4. Architecture Overview
+
+### High-level
+
+```mermaid
+graph TD
+  Browser["Browser / Crawler"]
+  PublicNav["Public Pages\n/ /posts/:slug\n/sitemap /robots"]
+  AuthPages["Authenticated Pages\n/dashboard /me /editor /admin"]
+  APIRoutes["API Routes\n/api/**"]
+  ServerActions["Server Actions\n'use server'"]
+  SupabaseDB["Supabase Postgres\n(RLS + security-definer)"]
+  SupabaseAuth["Supabase Auth\n(Google OAuth + magic link)"]
+  SupabaseStorage["Supabase Storage\nblog-media bucket"]
+  Resend["Resend\n(transactional email)"]
+  Sentry["Sentry\n(error monitoring)"]
+  Upstash["Upstash Redis\n(rate limiting)"]
+  Vercel["Vercel\n(hosting + cron)"]
+
+  Browser --> PublicNav
+  Browser --> AuthPages
+  Browser --> APIRoutes
+  AuthPages --> ServerActions
+  ServerActions --> SupabaseDB
+  PublicNav --> SupabaseDB
+  APIRoutes --> SupabaseDB
+  APIRoutes --> SupabaseAuth
+  Browser --> SupabaseStorage
+  APIRoutes --> SupabaseStorage
+  APIRoutes --> Resend
+  APIRoutes --> Upstash
+  PublicNav -.-> Sentry
+  AuthPages -.-> Sentry
+  APIRoutes -.-> Sentry
+  Vercel --> APIRoutes
+```
 
 ### Render model
-- **Server Components** by default — every page in `app/` resolves its data on the server before the response is sent
-- **Next 16 async route props** — dynamic `params` and `searchParams` are awaited in pages / metadata handlers before use
-- **Client Components** opt in with `"use client"` — used only for interactive surfaces (reactions, comments form, share button, subscribe form, theme toggle, post-view tracker, editor)
-- **Server Actions** with `"use server"` for every mutation — Zod-validated inputs, ownership checks, revalidation calls, structured `{ ok, error? }` returns
 
-### Read paths
-- **Public reads** (landing + post detail + comments + reaction counts + contributor stats) → `lib/db/public.ts` → service-role Supabase client → bypass RLS, strict `status='published'` filter
-- **Authenticated reads** (dashboard, /me/posts, /admin/*) → user-session Supabase client → RLS enforced
+- **Server Components** by default — every page resolves data on the server before the response is sent
+- **Client Components** (`"use client"`) — only for interactive surfaces: reactions, comments, subscribe form, theme toggle, editor, post-view tracker, lock heartbeat
+- **Server Actions** (`"use server"`) — every mutation; Zod-validated inputs, ownership checks, `revalidatePath` + `updateTag` invalidation, structured `{ ok, error? }` returns
+- **ISR** — landing page at 60-second TTL via `revalidate = 60`; public reads wrapped in `unstable_cache` tagged `public-feed`; `force-dynamic` for per-user pages
 
-### Write paths
-All writes flow through Server Actions with this pattern:
+### Request flows
 
-```ts
-"use server";
-async function someAction(input: T): Promise<{ ok: boolean; error?: string }> {
-  // 1. Zod.safeParse the input
-  // 2. requireSession / requireAuthor / requireManager
-  // 3. Cross-check ownership via DB lookup if needed
-  // 4. Use service-role client for the mutation (actor already verified)
-  // 5. revalidatePath + updateTag/revalidateTag for every affected surface
-  // 6. Return { ok: true, ... } or { ok: false, error } — never throw across the wire
-}
-```
+**Public post read:**
+Browser → Next server → `lib/db/public.ts` (service-role client, `status='published'`) → attach cover URLs, view counts, engagement counts, contributors → render
+
+**Editor save:**
+Browser → `app/(app)/editor/actions.ts:savePost()` → Zod validate → `requireSession/Author` → check edit lock → check collaborator role → Supabase write → `revalidatePath` + `updateTag` → `{ ok }`
+
+**Edit lock acquire:**
+`PostEditor` mount → `POST /api/posts/[id]/lock` → `getLockActor()` → upsert lock row → return `{ ok, lockedBy, expiresAt }` or 409 with current holder
 
 ### Caching topology
 
-| Surface | Strategy | TTL | Invalidator |
+| Surface | Strategy | TTL | Invalidated by |
 |---|---|---|---|
-| Landing post grid / tags / contributor stats | `unstable_cache` keyed per limit, tagged `public-feed` | 60 s | `updateTag("public-feed")` from server actions; `revalidateTag("public-feed", "default")` from scheduled-publish cron |
+| Landing post grid / tags / contributor stats | `unstable_cache` tagged `public-feed` | 60 s | `updateTag("public-feed")` from server actions; `revalidateTag` from cron |
 | Post detail page | `force-dynamic` | none | `revalidatePath("/posts/${slug}")` on publish / comment / reaction |
 | Admin / dashboard / my-posts | `force-dynamic` | none | direct `revalidatePath` on writes |
-| OG image proxy | `Cache-Control: public, max-age=3600, s-maxage=3600` | 1 h | n/a (fresh DB lookup per uncached hit) |
-| Media file proxy | `Cache-Control: public, max-age=3000, s-maxage=3000` | 50 min | pinned 10 min under signed-URL TTL |
-| Public media (`/og-default.png`, `/cg.png`) | Next static assets | immutable | n/a |
+| OG image proxy | `Cache-Control: public, max-age=3600, s-maxage=3600` | 1 h | n/a |
+| Media file proxy | `Cache-Control: public, max-age=3000, s-maxage=3000` | 50 min | n/a |
 
-See `docs/frontend-cache-audit.md` for the full audit + per-surface rationale.
+### Cron jobs (`vercel.json`)
 
-### Pre-hydration theme script
-`components/theme/ThemeScript.tsx` runs synchronously inside `<body>` *before* React mounts and stamps `data-theme="dark"` or `data-theme="light"` on `<html>` from localStorage, falling back to the explicit light default. There is no system mode, so first paint is deterministic and avoids a flash of wrong colors.
-
-### Runtime instrumentation
-- `instrumentation.ts` runs at process boot, validates required production env vars, warns on recommended observability/rate-limit env vars, and refuses production starts with a weak `CRON_SECRET`
-- `register()` imports runtime-specific Sentry config for Node or Edge
-- `onRequestError = Sentry.captureRequestError` sends Server Component and route-handler errors to Sentry when a DSN is configured
-- Browser errors use `sentry.client.config.ts`; server and edge errors use `sentry.server.config.ts` / `sentry.edge.config.ts`
-
-### Cron
-`vercel.json` registers:
-- `/api/cron/keep-alive` (`0 6 * * *`) — daily Supabase warm-up read for free-tier projects
-- `/api/cron/publish-scheduled` (`0 9 * * *`) — daily due-post promotion; promotes rows whose `scheduled_for` has arrived to `published`, dispatches per-post newsletters, invalidates the `public-feed` tag
-
-All cron requests authenticate via `Authorization: Bearer ${CRON_SECRET}`.
+| Schedule | Route | Purpose |
+|---|---|---|
+| `0 9 * * *` | `/api/cron/publish-scheduled` | Promote due scheduled posts to published; send newsletters; revalidate `public-feed` |
+| `0 6 * * *` | `/api/cron/keep-alive` | Supabase free-tier warm-up read |
 
 ---
 
-## 6. Route map
+## 5. File and Folder Structure
 
-### Public (no auth)
-| Path | Purpose |
-|---|---|
-| `/` | Landing — hero, search, tag pills, post grid, contributors, subscribe, footer |
-| `/posts/[slug]` | Post detail with view tracker, share button, reactions, comments, mid-article + bottom subscribe, related posts |
-| `/sitemap.xml` | Dynamic sitemap for home, archive alias, and published post detail pages |
-| `/robots.txt` | Allows public reader pages; disallows admin/editor/API/auth surfaces; points at sitemap |
-| `/login` | Sign-in (Google OAuth + magic link) |
-| `/unauthorized` | Editor-access denied page (reason-coded) |
-
-### Auth-only (any signed-in user — no editor role required)
-The auth callback (`/api/auth/callback`) bootstraps a profile for any Google account. Signed-in non-editors can comment / react / subscribe.
-
-### Editor-only (`role` ∈ `{author, manager}`)
-| Path | Notes |
-|---|---|
-| `/dashboard` | Command-center — today's author, week-at-a-glance, quick links |
-| `/me/posts` (alias `/my-posts`) | Own posts + trash bin |
-| `/editor/new` (alias `/transmit`) | Create — redirects to existing draft for this week if one exists |
-| `/editor/[id]` | Edit — TipTap rich-text editor |
-
-### Admin-only (`role === manager`)
-| Path | Notes |
-|---|---|
-| `/admin` | Stats + section cards |
-| `/admin/schedule` | Weekday assignment with conflict detection |
-| `/admin/users` | Allowlist CRUD with self-lockout + last-admin guards |
-| `/admin/tags` | Tag library |
-| `/admin/analytics` | Completion + per-author metrics + post engagement |
-| `/admin/subscribers` | Newsletter signups with search + filter |
-
-### API routes
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/auth/callback?code=&redirect=` | Supabase OAuth + magic-link return URL |
-| POST | `/api/auth/signout` | Clears session, redirects to `/login` |
-| POST | `/api/media/upload` | Registers direct Supabase Storage uploads; author-only, ownership-checked, MIME/size-validated, rate-limited |
-| GET | `/api/media/file?path=...` | Re-signs a storage path; 302 + 50 min Cache-Control |
-| GET | `/api/media/signed-url?path=...` | Admin tooling; auth required |
-| GET | `/api/media/list?postId=...` | Cover-image picker source |
-| GET | `/api/og-image/[slug]` | Stable OG image proxy — re-signs cover storage path; 302 to default for no-cover or unpublished |
-| POST | `/api/subscribe` | Idempotent subscribe; welcome email + reactivation logic |
-| GET/POST | `/api/subscribe/unsubscribe?t=<token>` | Confirm + apply unsubscribe |
-| POST | `/api/analytics/post-view` | Insert into `post_views` (30 min dedupe per session) |
-| GET | `/api/cron/publish-scheduled` | Daily — promote due scheduled posts + send newsletters |
-| GET | `/api/cron/keep-alive` | Daily — Supabase keep-alive ping |
-| GET | `/api/admin/newsletter-diagnostics` | Manager-only debug endpoint for Resend config |
-| POST | `/monitoring` | Sentry browser-event tunnel configured by `withSentryConfig` |
-
-### Redirects (legacy bookmarks)
-| Old | → | New |
-|---|---|---|
-| `/blog` | → | `/` |
-| `/blog/[slug]` | → | `/posts/[slug]` |
-| `/my-posts` | → | `/me/posts` |
-| `/transmit` | → | `/editor/new` |
-| `/archive` | → | `/me/posts#trash` |
-| Non-canonical Vercel host | 308 → | `NEXT_PUBLIC_APP_URL` host |
+```
+CG-Signal/
+├── app/                              # Next.js App Router root
+│   ├── (app)/                        # Authenticated group — requires session
+│   │   ├── actions/                  # Shared server actions (viewMode toggle)
+│   │   ├── admin/                    # Manager-only pages (stats, schedule, users, tags, analytics, subscribers)
+│   │   │   ├── actions.ts            # Admin server actions (setWeekday, upsertAuthorizedUser, createTag, …)
+│   │   │   ├── analytics/            # Analytics dashboard + per-user detail
+│   │   │   ├── schedule/
+│   │   │   ├── subscribers/
+│   │   │   ├── tags/
+│   │   │   └── users/
+│   │   ├── blog/                     # Legacy /blog → / redirect
+│   │   ├── dashboard/                # Editor command-center
+│   │   ├── editor/
+│   │   │   ├── [id]/page.tsx         # Edit an existing post (loads collaboration props)
+│   │   │   ├── actions.ts            # savePost, createDraftFromTemplate, soft/hard delete, collaboration actions
+│   │   │   └── new/page.tsx          # Create a new post
+│   │   ├── me/
+│   │   │   └── posts/page.tsx        # My Posts + Shared with Me + Trash
+│   │   └── layout.tsx                # Auth required; renders TopNav + PortalFooter
+│   ├── (auth)/                       # Public auth group
+│   │   ├── login/                    # Sign-in page
+│   │   └── unauthorized/             # Access-denied page
+│   ├── api/                          # API route handlers
+│   │   ├── admin/newsletter-diagnostics/   # Manager-only Resend debug
+│   │   ├── analytics/
+│   │   │   ├── event/route.ts        # Generic event tracking
+│   │   │   └── post-view/route.ts    # Per-post view registration
+│   │   ├── auth/
+│   │   │   ├── callback/route.ts     # OAuth / magic-link return; bootstraps profile
+│   │   │   └── signout/route.ts      # Clears session cookie
+│   │   ├── cron/
+│   │   │   ├── keep-alive/route.ts   # Daily Supabase warm-up
+│   │   │   └── publish-scheduled/route.ts  # Daily post promotion + newsletter
+│   │   ├── media/
+│   │   │   ├── file/route.ts         # Per-request media re-sign (302 + cache)
+│   │   │   ├── list/route.ts         # Media picker source
+│   │   │   ├── signed-url/route.ts   # Admin tooling
+│   │   │   └── upload/route.ts       # Metadata registration after direct upload
+│   │   ├── og-image/[slug]/route.ts  # Stable OG image proxy
+│   │   ├── posts/[id]/lock/
+│   │   │   ├── route.ts              # Acquire edit lock
+│   │   │   ├── heartbeat/route.ts    # Refresh lock TTL
+│   │   │   └── unlock/route.ts       # Release lock
+│   │   └── subscribe/
+│   │       ├── route.ts              # Newsletter subscribe
+│   │       └── unsubscribe/route.ts  # One-click unsubscribe
+│   ├── archive/                      # Legacy /archive → /me/posts#trash
+│   ├── my-posts/                     # Legacy /my-posts → /me/posts
+│   ├── posts/
+│   │   └── [slug]/
+│   │       ├── page.tsx              # Public post detail
+│   │       └── actions.ts            # addComment, deleteComment, toggleReaction
+│   ├── transmit/                     # Legacy /transmit → /editor/new
+│   ├── globals.css                   # CSS variables (colors, radii, shadows, typography)
+│   ├── layout.tsx                    # Root layout: fonts, ThemeProvider, Toaster, Analytics
+│   ├── page.tsx                      # Landing page
+│   ├── robots.ts                     # SEO exclusion rules
+│   └── sitemap.ts                    # Dynamic XML sitemap
+│
+├── components/                       # React components
+│   ├── admin/                        # ScheduleEditor, TagsAdmin, UsersAdmin
+│   ├── analytics/                    # AnalyticsTracker, PostViewTracker, PostAnalyticsTracker, DemoWatchingCounter
+│   ├── auth/                         # LoginForm
+│   ├── blog/                         # PostCard, PostRowActions
+│   ├── comments/                     # CommentsSection, CommentItem, CommentForm
+│   ├── dashboard/                    # WeeklyScheduleCard
+│   ├── editor/
+│   │   ├── PostEditor.tsx            # Main editor: TipTap instance, lock lifecycle, autosave, banners
+│   │   ├── PostEditorLoader.tsx      # Lazy-loads editor chunk
+│   │   ├── EditorToolbar.tsx         # Sticky formatting toolbar
+│   │   ├── SchedulePostModal.tsx     # Calendar + time picker
+│   │   ├── CollaboratorsPanel.tsx    # Invite/remove collaborators, role management
+│   │   └── ReviewCommentsPanel.tsx   # Draft review comments thread
+│   ├── landing/                      # ContributorCard, ContributorsSection, PostThumbnail, SubscribeSection, SubscribeMiniCta
+│   ├── layout/                       # PublicNav, TopNav, PortalFooter, ViewModeBanner, ViewModeButton
+│   ├── posts/
+│   │   ├── PostContributorsRow.tsx   # Co-author byline (avatar + first name + role per contributor)
+│   │   └── PostShareButton.tsx       # Web Share API + clipboard fallback
+│   ├── portal/                       # BrandLockup, Panel, SystemLabel, Ticker
+│   ├── reactions/                    # ReactionsBar
+│   ├── theme/                        # ThemeProvider, ThemeScript, ThemeToggle
+│   └── ui/                           # Button, Card, Input, Textarea, Avatar, Badge, Select, Skeleton
+│
+├── lib/                              # Server utilities and business logic
+│   ├── analytics/                    # client-context.ts, server.ts, track.ts, events.ts, admin.ts
+│   ├── api/
+│   │   └── edit-lock.ts              # getLockActor() — shared by all three lock routes
+│   ├── auth/
+│   │   ├── collaboration.ts          # Pure permission logic: deriveAccess(), isLockActive(), PostAccess interface
+│   │   ├── guards.ts                 # requireSession(), requireAuthor(), requireManager()
+│   │   ├── roles.ts                  # roleLabel(), role comparison helpers
+│   │   ├── safeRedirect.ts           # Prevents open-redirect attacks
+│   │   └── viewMode.ts               # "View as member" cookie logic
+│   ├── db/
+│   │   ├── collaboration.ts          # getCollaboratorRole(), resolvePostAccess(), listCollaborators(), loadEditorCollaboration()
+│   │   ├── posts.ts                  # getDraftPostByIdWithAccess(), listSharedPosts(), listEditablePostsForUser()
+│   │   ├── profiles.ts               # getProfile(), listProfiles(), updateProfile()
+│   │   ├── public.ts                 # listPublicPosts(), getPublicPostBySlug(), attachContributors(), PUBLIC_FEED_TAG
+│   │   ├── tags.ts                   # listTags(), createTag(), deleteTag()
+│   │   └── types.ts                  # Hand-written DB types: enums, row interfaces, Database map
+│   ├── editor/                       # sanitize.ts, extensions.ts, media-extensions.ts, paste-sanitize.ts, template.ts
+│   ├── email/                        # resend.ts, templates.ts, newsletter.ts
+│   ├── media/
+│   │   └── direct-upload.ts          # Browser → Supabase Storage direct upload helper
+│   ├── seo/                          # get-og-image-url.ts
+│   ├── supabase/                     # client.ts, server.ts, middleware.ts
+│   ├── utils/                        # cn.ts, dates.ts, embeds.ts, file-validation.ts, names.ts, normalize-text.ts, read-time.ts, slugs.ts
+│   ├── brand.ts                      # Brand identity constants
+│   ├── env.ts                        # Centralized env access; splits public/server-only vars
+│   ├── ratelimit.ts                  # Upstash sliding-window limiter
+│   ├── reactions.ts                  # ALLOWED_REACTIONS, EmojiLabel enum
+│   ├── team.ts                       # TEAM_META.displayOrder (stable contributor order)
+│   └── theme/                        # theme-config.ts
+│
+├── supabase/
+│   ├── migrations/                   # SQL migrations 0001–0014 (run in order)
+│   └── config.toml                   # Supabase CLI project config
+│
+├── tests/
+│   ├── e2e/                          # Playwright tests (auth.spec.ts, post-contributors.spec.ts)
+│   └── unit/                         # Vitest tests (9 files, 48 assertions)
+│
+├── docs/                             # Living documentation (see § 20)
+├── public/                           # Static assets (cg.png, og-default.png)
+├── .env                              # Local environment variables (never commit real secrets)
+├── instrumentation.ts                # Boot-time env validation + Sentry init
+├── middleware.ts                     # Edge middleware: cookie refresh + canonical host redirect
+├── next.config.mjs                   # Next.js + Sentry config
+├── playwright.config.ts
+├── tailwind.config.ts
+├── tsconfig.json
+├── vercel.json                       # Cron job declarations
+└── vitest.config.ts
+```
 
 ---
 
-## 7. Database schema
+## 6. Database Schema
 
-Migrations in `supabase/migrations/`:
+Migrations are in `supabase/migrations/` and must be applied in order. The Supabase CLI (`supabase db push`) or the SQL editor can be used.
 
-| File | Adds |
+| Migration | Purpose |
 |---|---|
-| `0001_init.sql` | Enums (`app_role`, `post_status`, `media_type`, `media_source_type`), tables (`app_settings`, `profiles`, `authorized_users`, `tags`, `post_templates`, `posts`, `media_assets`, `post_tags`, `audit_logs`), triggers, indexes |
-| `0002_helpers_and_bootstrap.sql` | Helper SQL functions (`is_convegenius_user`, `current_user_role`, `is_manager`, `is_author_or_manager`, `is_authorized_author`, `assign_weekday`, `bootstrap_profile`) |
+| `0001_init.sql` | Enums, core tables (app_settings, profiles, authorized_users, tags, post_templates, posts, media_assets, post_tags, audit_logs), triggers, indexes |
+| `0002_helpers_and_bootstrap.sql` | Security-definer RPC helpers (is_convegenius_user, current_user_role, is_manager, bootstrap_profile, assign_weekday) |
 | `0003_rls_policies.sql` | RLS policies on every table + storage policies on `blog-media` |
-| `0004_constraints_and_indexes.sql` | Speed indexes (`posts(author_id, status, updated_at desc)`, `post_tags(tag_id)`) |
-| `0005_rewrite_signed_media_urls.sql` | One-shot rewrite of legacy signed URLs into `/api/media/file?path=...` |
-| `0007_comments_reactions.sql` | `comments` + `reactions` tables, RLS policies |
+| `0004_constraints_and_indexes.sql` | Performance indexes (posts by author/status, post_tags by tag_id) |
+| `0005_rewrite_signed_media_urls.sql` | One-shot rewrite of legacy signed URLs to `/api/media/file?path=…` |
+| `0007_comments_reactions.sql` | `comments` + `reactions` tables + RLS |
 | `0008_subscribers.sql` | `subscribers` table with `unsubscribe_token`, `unsubscribed_at`, `source` |
-| `0009_newsletter_sent_at.sql` | `posts.newsletter_sent_at` + partial index for unsent posts |
-| `0010_post_views.sql` | `post_views` table for engagement analytics |
-| `0011_save_performance_indexes.sql` | Indexes that speed up the save-publish hot path |
+| `0009_newsletter_sent_at.sql` | `posts.newsletter_sent_at` + partial index for unsent published posts |
+| `0010_post_views.sql` | `post_views` table for per-session view analytics |
+| `0011_save_performance_indexes.sql` | Indexes for the save/publish hot path |
+| `0012_analytics_v2.sql` | `analytics_sessions` + `analytics_events` tables for rich event tracking |
+| `0013_collaboration.sql` | `post_collaborators`, `post_edit_locks`, `post_review_comments`, `post_contributors` + 7 security-definer collaboration helpers + `tg_posts_protect_author` trigger |
+| `0014_sync_contributors.sql` | Backfill owner + editor credit rows into `post_contributors` for existing published posts |
 
-### Key tables
+### Enums
+
+| Enum | Values |
+|---|---|
+| `app_role` | `viewer`, `author`, `manager` |
+| `post_status` | `draft`, `submitted`, `scheduled`, `published`, `archived` |
+| `media_type` | `image`, `video`, `audio`, `document` |
+| `media_source_type` | `upload`, `external_url` |
+| `post_collaborator_role` | `editor`, `reviewer` |
+| `post_contributor_role` | `owner`, `editor`, `contributor` |
+
+### Tables
+
+#### Core
 
 ```sql
-posts (
-  id uuid PK, author_id uuid → profiles, title, slug unique,
-  excerpt, content_json jsonb, content_html, status post_status,
-  week_start_date date, assigned_weekday smallint,
-  published_at, scheduled_for, cover_media_id,
-  read_time_minutes int, newsletter_sent_at timestamptz,
-  created_at, updated_at, archived_at
+app_settings (
+  id        int  PK  CHECK (id = 1),      -- singleton row
+  allowed_domain         text,
+  require_manager_review bool,
+  max_upload_mb          int,
+  updated_at             timestamptz
 )
 
 profiles (
-  id uuid PK → auth.users, email unique, full_name, avatar_url,
-  role app_role, weekly_post_day smallint, is_active bool,
-  created_at, updated_at
+  id              uuid PK → auth.users,
+  email           text UNIQUE,
+  full_name       text,
+  avatar_url      text,
+  role            app_role DEFAULT 'viewer',
+  weekly_post_day smallint CHECK (1–5),
+  is_active       bool DEFAULT true,
+  created_at      timestamptz,
+  updated_at      timestamptz      -- auto via tg_set_updated_at trigger
 )
+INDEX: (email), (role)
 
 authorized_users (
-  id uuid PK, email unique, role app_role,
-  weekly_post_day smallint, created_by, created_at
+  id              uuid PK,
+  email           text UNIQUE,
+  role            app_role,
+  weekly_post_day smallint,
+  created_by      uuid → profiles,
+  created_at      timestamptz
 )
 
-comments (
-  id uuid PK, post_id → posts, user_id → auth.users,
-  author_name, author_avatar_url, body (1..100 chars),
-  created_at, deleted_at, deleted_by
+posts (
+  id               uuid PK,
+  author_id        uuid → profiles,
+  title            text,
+  slug             text UNIQUE,
+  excerpt          text,
+  content_json     jsonb,
+  content_html     text,
+  status           post_status DEFAULT 'draft',
+  week_start_date  date,
+  assigned_weekday smallint,
+  published_at     timestamptz,
+  scheduled_for    timestamptz,
+  cover_media_id   uuid → media_assets,
+  read_time_minutes int DEFAULT 0,
+  newsletter_sent_at timestamptz,
+  created_at       timestamptz,
+  updated_at       timestamptz,    -- auto via tg_set_updated_at trigger
+  archived_at      timestamptz
+)
+INDEX: (status, published_at DESC), (author_id, week_start_date), (slug)
+TRIGGER: tg_posts_protect_author — non-managers cannot change author_id (prevents ownership hijack)
+
+tags (
+  id         uuid PK,
+  name       text UNIQUE,
+  slug       text UNIQUE,
+  created_at timestamptz
 )
 
-reactions (
-  id uuid PK, post_id → posts, user_id → auth.users,
-  emoji (check ∈ allowed list), created_at,
-  unique (post_id, user_id, emoji)
+post_tags (
+  post_id  uuid → posts,
+  tag_id   uuid → tags,
+  PRIMARY KEY (post_id, tag_id),
+  ON DELETE CASCADE
 )
 
-subscribers (
-  id uuid PK, email unique, unsubscribe_token uuid,
-  unsubscribed_at timestamptz, created_at, source text
-)
-
-post_views (
-  id uuid PK, post_id → posts, viewer_id uuid (nullable),
-  session_id text, created_at,
-  unique (post_id, session_id, dedupe_window)
+post_templates (
+  id           uuid PK,
+  name         text,
+  description  text,
+  content_json jsonb,
+  is_default   bool,
+  created_by   uuid → profiles,
+  created_at   timestamptz
 )
 
 media_assets (
-  id uuid PK, owner_id → profiles, post_id → posts,
-  storage_bucket, storage_path, source_type, media_type,
-  mime_type, size_bytes, external_url, provider, title, alt_text,
-  duration_seconds, created_at
+  id               uuid PK,
+  owner_id         uuid → profiles,
+  post_id          uuid → posts (ON DELETE SET NULL),
+  storage_bucket   text,
+  storage_path     text,
+  source_type      media_source_type,
+  media_type       media_type,
+  mime_type        text,
+  size_bytes       bigint,
+  external_url     text,
+  provider         text,
+  title            text,
+  alt_text         text,
+  duration_seconds int,
+  created_at       timestamptz
 )
+INDEX: (post_id), (owner_id)
+
+audit_logs (
+  id          uuid PK,
+  actor_id    uuid → profiles,
+  action      text,
+  entity_type text,
+  entity_id   uuid,
+  metadata    jsonb,
+  created_at  timestamptz
+)
+INDEX: (actor_id)
+```
+
+#### Engagement
+
+```sql
+comments (
+  id               uuid PK,
+  post_id          uuid → posts,
+  user_id          uuid → auth.users,
+  author_name      text,
+  author_avatar_url text,
+  body             text CHECK (LENGTH(body) BETWEEN 1 AND 100),
+  created_at       timestamptz,
+  deleted_at       timestamptz,    -- soft delete
+  deleted_by       uuid → auth.users
+)
+INDEX: (post_id, created_at DESC), (user_id)
+
+reactions (
+  id         uuid PK,
+  post_id    uuid → posts,
+  user_id    uuid → auth.users,
+  emoji      text CHECK (emoji IN ('👍','❤️','😂','🎉','👀','🚀')),
+  created_at timestamptz,
+  UNIQUE (post_id, user_id, emoji)
+)
+
+subscribers (
+  id                uuid PK,
+  email             text UNIQUE,
+  unsubscribe_token uuid DEFAULT gen_random_uuid(),
+  unsubscribed_at   timestamptz,
+  created_at        timestamptz,
+  source            text
+)
+INDEX: (unsubscribed_at), (unsubscribe_token)
+```
+
+#### Analytics
+
+```sql
+post_views (
+  id                  uuid PK,
+  post_id             uuid → posts,
+  viewer_id           uuid → auth.users (nullable),
+  session_id          text,
+  user_agent          text,
+  referrer            text,
+  ip_hash             text,
+  created_at          timestamptz,
+  path                text,
+  device_type         text,
+  browser             text,
+  os                  text,
+  country             text,
+  city                text,
+  viewport_width      int,
+  viewport_height     int,
+  time_zone           text,
+  language            text,
+  is_logged_in        bool,
+  time_spent_seconds  int,
+  scroll_depth        int,
+  read_complete       bool
+)
+INDEX: (post_id), (created_at), (post_id, session_id, created_at) for dedupe
+
+analytics_sessions (
+  id              uuid PK,
+  session_id      text UNIQUE,
+  user_id         uuid → auth.users (nullable),
+  first_seen_at   timestamptz,
+  last_seen_at    timestamptz,
+  device_type     text,
+  browser         text,
+  os              text,
+  country         text,
+  city            text,
+  referrer        text,
+  landing_path    text,
+  user_agent      text,
+  ip_hash         text,
+  event_count     int DEFAULT 0,
+  page_view_count int DEFAULT 0
+)
+INDEX: (user_id), (last_seen_at), (device_type)
+
+analytics_events (
+  id         uuid PK,
+  session_id text → analytics_sessions.session_id,
+  user_id    uuid → auth.users (nullable),
+  event_name text CHECK (event_name IN ('page_view','post_view','subscribe_cta_view',
+                         'subscribe_submit','subscribe_success','post_share',
+                         'post_react','post_comment','scroll_depth',...)),
+  post_id    uuid → posts (nullable),
+  path       text,
+  metadata   jsonb,
+  created_at timestamptz
+)
+INDEX: (post_id, created_at), (session_id, created_at), (user_id, created_at), (event_name, created_at)
+```
+
+#### Collaboration
+
+```sql
+post_collaborators (
+  id          uuid PK,
+  post_id     uuid → posts,
+  user_id     uuid → profiles,
+  role        post_collaborator_role,  -- 'editor' | 'reviewer'
+  invited_by  uuid → profiles,
+  created_at  timestamptz,
+  UNIQUE (post_id, user_id)
+)
+INDEX: (post_id), (user_id)
+
+post_edit_locks (
+  post_id    uuid PK → posts,
+  locked_by  uuid → profiles,
+  locked_at  timestamptz,
+  expires_at timestamptz      -- TTL = 5 minutes; refreshed by 60s heartbeat
+)
+INDEX: (expires_at)
+
+post_review_comments (
+  id          uuid PK,
+  post_id     uuid → posts,
+  user_id     uuid → profiles,
+  body        text CHECK (LENGTH(body) <= 500),
+  resolved_at timestamptz,    -- nullable; set when resolved
+  created_at  timestamptz
+)
+INDEX: (post_id, created_at DESC)
+
+post_contributors (
+  id            uuid PK,
+  post_id       uuid → posts,
+  user_id       uuid → profiles,
+  role          post_contributor_role,  -- 'owner' | 'editor' | 'contributor'
+  display_order int DEFAULT 50,         -- owner = 0
+  created_at    timestamptz,
+  UNIQUE (post_id, user_id)
+)
+INDEX: (post_id, display_order)
+```
+
+### Security Model
+
+RLS is enabled on all tables. Policies are built on **security-definer helper functions** to prevent recursion:
+
+```
+Auth helpers (bypass RLS):
+  current_user_email()          → authenticated user's email
+  is_convegenius_user()         → email domain matches APP_ALLOWED_EMAIL_DOMAIN
+  current_user_role()           → 'viewer' | 'author' | 'manager'
+  is_manager()                  → role = 'manager'
+  is_author_or_manager()        → role ∈ {'author','manager'}
+  is_authorized_author()        → role ∈ {'author','manager'}
+
+Collaboration helpers (called by post_collaborators, post_edit_locks, etc. — NOT by posts
+itself, to avoid recursion where a posts policy reads post_collaborators whose policy reads posts):
+  is_post_owner(post_id)                → author_id = current user
+  is_post_collaborator(post_id)         → row exists in post_collaborators
+  is_post_editor_collaborator(post_id)  → collaborator with role='editor'
+  can_read_draft_post(post_id)          → owner OR collaborator (either role)
+  can_edit_draft_post(post_id)          → owner OR editor collaborator
+  can_review_draft_post(post_id)        → owner OR any collaborator
+  can_manage_post_collaborators(post_id) → owner OR manager
+```
+
+### Entity Relationship
+
+```mermaid
+erDiagram
+  profiles ||--o{ posts : "author_id"
+  profiles ||--o{ post_collaborators : "user_id"
+  profiles ||--o{ post_contributors : "user_id"
+  profiles ||--o{ post_edit_locks : "locked_by"
+  profiles ||--o{ post_review_comments : "user_id"
+  profiles ||--o{ media_assets : "owner_id"
+  posts ||--o{ post_tags : "post_id"
+  posts ||--o{ post_collaborators : "post_id"
+  posts ||--o{ post_contributors : "post_id"
+  posts ||--o{ post_edit_locks : "post_id"
+  posts ||--o{ post_review_comments : "post_id"
+  posts ||--o{ media_assets : "post_id"
+  posts ||--o{ comments : "post_id"
+  posts ||--o{ reactions : "post_id"
+  posts ||--o{ post_views : "post_id"
+  posts ||--o{ analytics_events : "post_id"
+  tags ||--o{ post_tags : "tag_id"
+  analytics_sessions ||--o{ analytics_events : "session_id"
 ```
 
 ---
 
-## 8. Server actions & API routes
+## 7. Environment Variables
 
-### Server actions (App Router `"use server"`)
+### Required
 
-| File | Functions |
-|---|---|
-| `app/(app)/editor/actions.ts` | `savePost`, `createDraftFromTemplate`, `createTagAsAuthor`, `softDeletePost`, `restorePost`, `permanentDeletePost`, `archivePost` (alias) |
-| `app/(app)/admin/actions.ts` | `setWeekday`, `upsertAuthorizedUser`, `removeAuthorizedUser`, `createTag`, `deleteTag`, `setPostStatus` |
-| `app/(app)/actions/viewMode.ts` | `setViewMode(enabled)` |
-| `app/posts/[slug]/actions.ts` | `addComment`, `deleteComment`, `toggleReaction` |
+| Variable | Scope | Purpose | Example |
+|---|---|---|---|
+| `NEXT_PUBLIC_APP_URL` | public | Canonical app origin; used in email links + OG URLs | `https://convegenius-blog.vercel.app` |
+| `NEXT_PUBLIC_SUPABASE_URL` | public | Supabase project URL | `https://xyzxyz.supabase.co` |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | public | Supabase anon/publishable key | `eyJhbGci...` |
+| `SUPABASE_SERVICE_ROLE_KEY` | **server only** | Service-role key for bypassing RLS on server reads/writes | `eyJhbGci...` |
+| `APP_ALLOWED_EMAIL_DOMAIN` | both | Internal domain; controls who is recognized as an internal user | `convegenius.ai` |
+| `APP_MANAGER_EMAIL` | both | Comma-separated manager emails; seeded into `authorized_users` | `aditya.c@convegenius.ai,sumit.kumar@convegenius.ai` |
+| `APP_AUTHOR_EMAILS` | both | Comma-separated author emails; seeded into `authorized_users` | `om.kumar@convegenius.ai,...` |
+| `CRON_SECRET` | server | Bearer token authenticating cron route calls; minimum 24 chars in production | `openssl rand -hex 32` output |
+| `RESEND_API_KEY` | server | Resend transactional email API key | `re_...` |
+| `RESEND_FROM` | server | Sender address; `onboarding@resend.dev` (sandbox) or `newsletter@<domain>` (verified) | `newsletter@convegenius.ai` |
 
-### Mutation invariants
+### Optional
 
-Every server action that affects publicly-visible state calls **both**:
-- `revalidatePath(<surface>)` — kicks the route segment's render cache
-- `updateTag("public-feed")` — expires the `unstable_cache` entries for landing-page reads immediately after editor/admin mutations
-
-The scheduled-publish route handler uses `revalidateTag("public-feed", "default")` instead, because cron runs outside a Server Action.
-
-This pairing is the contract that lets the public feed sit on a 60-second TTL safely.
-
----
-
-## 9. Caching strategy
-
-### Server-side ISR
-- **Landing page** (`app/page.tsx`) — `export const revalidate = 60`; uses `searchParams` so the route is server-rendered, but the heavy Supabase reads inside hit `unstable_cache`
-- **Post detail** — `force-dynamic` because it mixes per-user data (session, myReactions); future work to split this surface
-- **Admin / dashboard / my-posts** — `force-dynamic`; per-user data, low traffic, no caching value
-
-### `unstable_cache` wrapping
-Three public reads wrap their uncached implementation with `unstable_cache`:
-
-```ts
-export const listPublicPosts        = unstable_cache(uncached, [key], { revalidate: 60, tags: ["public-feed"] });
-export const listPublicTags         = unstable_cache(uncached, [key], { revalidate: 60, tags: ["public-feed"] });
-export const listContributorStats   = unstable_cache(uncached, [key], { revalidate: 60, tags: ["public-feed"] });
-```
-
-The single `PUBLIC_FEED_TAG` is invalidated on:
-- post publish / archive / hard-delete
-- admin post-status change
-- tag CRUD (admin + author-shortcut)
-- cron `publish-scheduled` per promoted row
-
-### Client-side
-- **No client cache library** (no SWR, no React Query)
-- Comments + reactions use **optimistic UI** + `router.refresh()` after server-action mutations
-- Editor saves use a **15s server autosave** + **3s localStorage backup** for crash resilience
-
-### Image cache
-- **OG image proxy** — 1 h Cache-Control on the 302 redirect; crawlers cache the resolved bytes for far longer
-- **Media file proxy** — 50 min cache, pinned 10 min under the signed-URL TTL so browsers always re-resolve before signatures expire
-
----
-
-## 10. Newsletter pipeline
-
-### Subscribe flow
-1. User submits an email to `POST /api/subscribe` (`{ email, source }`)
-2. `checkRateLimit("subscribe", clientIp)` allows 5 attempts / 60 s when Upstash is configured; 429 responses include `X-RateLimit-*` headers
-3. Zod validates the email + source length
-4. Service-role client looks up the existing subscriber by email
-5. Three branches:
-   - **New email** → insert + send welcome
-   - **Previously unsubscribed** → clear `unsubscribed_at`, rotate token, re-send welcome
-   - **Already active** → no DB change, friendly toast
-6. Welcome email is fire-and-forget — never blocks the API response
-7. Response always returns `{ ok: true }` for accepted requests to mitigate enumeration; errors are logged server-side
-
-### Per-post send flow (Post Now)
-1. Editor calls `savePost(... status: "published")`
-2. Action publishes the row + revalidates paths/tags
-3. Action calls `sendPerPostNewsletter(postId)`
-4. Newsletter helper:
-   - `UPDATE posts SET newsletter_sent_at = now() WHERE id = $1 AND newsletter_sent_at IS NULL RETURNING id` — guarantees one-shot delivery
-   - If no row returned, the post was already sent → skip
-   - Fetch post + author + cover signed URL (or `/og-default.png`)
-   - Select `subscribers WHERE unsubscribed_at IS NULL`
-   - For each recipient, render `postNotificationTemplate` and call `sendEmail`
-   - Per-recipient List-Unsubscribe URL embedded with the recipient's token
-
-### Per-post send flow (scheduled cron)
-- `/api/cron/publish-scheduled` runs daily at `0 9 * * *` via Vercel
-- Selects `posts WHERE status = 'scheduled' AND scheduled_for <= now()`
-- Promotes each to `published`, sets `published_at = scheduled_for`
-- Calls `sendPerPostNewsletter` (same idempotent path)
-- Revalidates `/`, `/posts/${slug}`, and the `public-feed` tag
-
-### Unsubscribe flow
-- `/api/subscribe/unsubscribe?t=<token>` GET → confirmation page
-- POST same URL → sets `unsubscribed_at = now()` matching the token
-- Already-unsubscribed tokens return "Already unsubscribed" page
-- Malformed / missing tokens → "Link expired" page
-- All pages link back to `/` ("Back to the newsletter")
-
-### Resend modes
-- **Sandbox** — `RESEND_FROM = onboarding@resend.dev` delivers ONLY to the Resend account owner email. Detected automatically; surfaced as a warning in `/api/admin/newsletter-diagnostics`
-- **Verified domain** — `RESEND_FROM = newsletter@<your-domain>` after DNS verification; delivers to anyone
-
-### Diagnostics
-- `/api/admin/newsletter-diagnostics` (manager-only) returns:
-  - Active Resend config (without exposing the API key)
-  - Sandbox/verified status
-  - Subscriber counts
-  - Last delivery error if any
-
----
-
-## 11. Media pipeline
-
-### Direct upload (current media path)
-1. User picks a file in the editor
-2. Editor calls `directUploadMedia({ file, postId })` from `lib/media/direct-upload.ts`
-3. Helper builds a storage path shaped as `{userId}/{postId|drafts}/{timestamp}-{filename}`
-4. Browser uploads bytes directly to Supabase Storage via the Supabase client — bypasses Vercel's 4.5 MB function payload cap
-5. Helper POSTs a tiny JSON metadata payload to `/api/media/upload`
-6. Route verifies the caller is an author/manager, rate-limits the request, validates path ownership, strips unsafe filename characters, checks MIME + size caps, and inserts the `media_assets` row
-7. Returns `{ signedUrl: "/api/media/file?path=..." }` — a stable URL the editor embeds
-
-### No server byte relay
-`/api/media/upload` no longer accepts `multipart/form-data` or streams file bytes through Vercel. All file data goes browser → Supabase Storage; the Next route only records metadata after the object exists.
-
-### Per-request re-signing
-- Embedded URLs look like `/api/media/file?path=<storage-path>`
-- On every fetch:
-  - Path passes regex sanity check (UUID/UUID/anything)
-  - Logged-in `@convegenius.ai` users → service signs and 302s
-  - Anonymous users → service verifies the `media_assets` row belongs to a `published` post, then signs and 302s
-  - Anonymous + path doesn't resolve to a published post → 404
-- 50-minute browser cache pinned under the 1-hour Supabase signed-URL TTL
-
-### Validation
-- MIME allow-list: `image/jpeg|png|webp|gif`, `video/mp4|webm|quicktime`, `audio/*` subset
-- Per-file size caps via env (`NEXT_PUBLIC_MAX_UPLOAD_MB`, video / audio variants)
-- Supabase bucket has a per-object byte cap (default 50 MB free tier; raise the bucket setting and env caps together if the project plan supports larger files)
-- Metadata registration is limited to 30 uploads / 60 s per authenticated user when Upstash is configured
-
-### Custom TipTap nodes
-- `AudioBlock` — schema-aware `<audio>` element with playback chrome
-- `VideoBlock` — schema-aware `<video>` element supporting autoplay-muted / poster / loop
-- `EmbedBlock` — sandboxed `<iframe>` with `referrerpolicy="strict-origin-when-cross-origin"` so unlisted YouTube videos don't trip error 153
-
----
-
-## 12. Design system
-
-### Identity
-"Retro-futuristic editorial OS." Strong outlines, monospace UI text, hero-font wordmarks, sparing accent colors. Inspired by terminal interfaces + Japanese editorial typography.
-
-### Tokens (CSS variables in `app/globals.css`)
-
-Theme-independent:
-
-```css
---radius-xs: 8px;   --radius-sm: 12px;  --radius-md: 16px;
---radius-lg: 20px;  --radius-panel: 24px; --radius-xl: 32px;
---radius-pill: 999px;
---tracking-tight: -0.04em;  --tracking-label: 0.18em;  --tracking-wide: 0.12em;
---leading-hero: 0.88;       --leading-title: 0.95;     --leading-body: 1.65;
-```
-
-Theme palette (dark CSS fallback; light is stamped before first paint for first-time visitors):
-
-```css
---bg-main, --bg-page, --bg-panel, --bg-panel-raised, --bg-panel-soft, --bg-inverse
---text-main, --text-muted, --text-soft, --text-inverse
---border-main, --border-muted, --border-soft
---accent-orange, --accent-blue, --accent-green, --accent-yellow, --accent-red
-```
-
-### Fonts
-- `Orbitron` 500/700/800/900 — hero wordmarks, panel titles, headlines
-- `Space Mono` 400/700 — UI labels, body, metadata, code
-
-### Component primitives
-
-| Primitive | File | Notes |
+| Variable | Default | Purpose |
 |---|---|---|
-| `Button` | `components/ui/Button.tsx` | 6 variants, pill, hairline border on cream CTAs |
-| `Card` | `components/ui/Card.tsx` | alias for `.portal-panel` |
-| `Input` / `Textarea` | `components/ui/Input.tsx` | rounded-lg fields with consistent focus ring |
-| `Badge` | `components/ui/Badge.tsx` | 8 tonal variants |
-| `Avatar` | `components/ui/Avatar.tsx` | initials fallback with border |
-| `Select` | `components/ui/Select.tsx` | custom theme arrow |
-| `Skeleton` | `components/ui/Skeleton.tsx` | bordered loading pulse |
-| `Panel` | `components/portal/Panel.tsx` | 4 variants: default / raised / bright / soft |
-| `SystemLabel` | `components/portal/SystemLabel.tsx` | mono uppercase chip |
-| `BrandLockup` | `components/portal/BrandLockup.tsx` | icon + "CG Signal · Team Blog Newsletter" wordmark |
-| `Ticker` | `components/portal/Ticker.tsx` | marquee utility |
+| `NEXT_PUBLIC_REQUIRE_MANAGER_REVIEW` | `false` | If `true`, author "Post Now" becomes "Submit for Review" (`status = submitted`) |
+| `NEXT_PUBLIC_MAX_UPLOAD_MB` | `50` | Per-file image upload cap |
+| `NEXT_PUBLIC_MAX_VIDEO_UPLOAD_MB` | `50` | Per-file video upload cap |
+| `NEXT_PUBLIC_MAX_AUDIO_UPLOAD_MB` | `50` | Per-file audio upload cap |
+| `NEXT_PUBLIC_ENABLE_DEMO_WATCHING_COUNTER` | `false` | Show the explicitly-labeled simulated activity pill in the public nav |
+| `NEXT_PUBLIC_SENTRY_DSN` | unset | Browser Sentry capture; production boot warns when missing |
+| `SENTRY_DSN` | unset | Server/edge Sentry capture; falls back to public DSN |
+| `SENTRY_ORG` | unset | Sentry org slug for source-map upload during Vercel builds |
+| `SENTRY_PROJECT` | unset | Sentry project slug |
+| `SENTRY_AUTH_TOKEN` | unset | Sentry source-map upload token |
+| `UPSTASH_REDIS_REST_URL` | unset | Enables rate limiting when paired with token |
+| `UPSTASH_REDIS_REST_TOKEN` | unset | Enables rate limiting when paired with URL |
+| `AUTH_TEST_BASE_URL` | `http://localhost:3000` | Base URL for Playwright e2e tests |
+| `CONTRIBUTORS_TEST_SLUG` | unset | Published post slug for co-author byline e2e test |
+| `CONTRIBUTORS_TEST_NAMES` | unset | Comma-separated expected contributor first names for e2e test |
 
-### Utility CSS
-
-| Class | Purpose |
-|---|---|
-| `.post-grid` | Auto-fit fluid grid for the landing signal feed (320 px floor, `clamp(16, 2vw, 24)` gap) |
-| `.post-grid-tight` | Narrower variant for the post-detail related-posts strip (240 px floor) |
-| `.grid-overlay`, `.checker`, `.concentric`, `.scanlines` | Decorative pattern backgrounds for thumbnails / hero |
-| `.hero-gradient` | Brand radial gradient for the landing hero halo |
-| `.signal-glow` | 16 px green box-shadow pulse |
-| `.signal-dot` | Pulsing live-transmission dot |
+> **Security note:** `SUPABASE_SERVICE_ROLE_KEY` must never reach the browser bundle. It is only imported inside `lib/supabase/server.ts → createSupabaseServiceClient()`. Rate limiting and Sentry degrade gracefully when their env vars are missing; `instrumentation.ts` warns in production if they are absent.
 
 ---
 
-## 13. Theming
+## 8. Setup Instructions
 
-- **Pre-hydration script** (`components/theme/ThemeScript.tsx`) runs synchronously before paint; reads `cg_signal_theme` from localStorage, falls back to `light`, and stamps `data-theme="dark"` or `data-theme="light"` on `<html>`
-- **Light theme as default** for first-time visitors (overrideable via the toggle)
-- **Theme toggle** (`components/theme/ThemeToggle.tsx`) — two explicit modes: light / dark; persists to localStorage immediately
-- **No "system" mode** — user picks one explicitly; reduces test-matrix surface
-- **CSS-variable swap** — switching themes mutates `data-theme` only; no React re-render needed for the entire page; instant visual flip
-- See `docs/theme-system.md`, `docs/theme-light-default.md`, `docs/light-mode-guidelines.md` for full color rationale
+### Prerequisites
 
----
+- **Node.js ≥ 20** and **npm ≥ 10**
+- A **Supabase** project (free tier sufficient)
+- A **Google Cloud** OAuth 2.0 client (for Google sign-in)
+- (Optional) **Resend** account for newsletter delivery
+- (Optional) **Upstash Redis** for rate limiting
 
-## 14. Local development
+### 1. Clone and install
 
 ```powershell
-git clone <repo>
-cd CG_Blog
+git clone <repo-url> CG-Signal
+cd CG-Signal
 npm install
-New-Item -ItemType File .env.local -Force   # then fill in vars from section 16
-npm run dev                    # http://localhost:3000
 ```
 
-### Useful scripts
+### 2. Configure environment variables
 
-| Command | Does |
+```powershell
+Copy-Item .env .env.local
+# Edit .env.local and fill in all required variables from § 7
+```
+
+### 3. Set up Supabase
+
+1. Create a new Supabase project at [supabase.com](https://supabase.com)
+2. Copy the **Project URL**, **anon key**, and **service-role key** into `.env.local`
+3. Open the SQL Editor and apply migrations in order:
+
+```sql
+-- Run each file in order via Supabase SQL Editor or supabase db push
+supabase/migrations/0001_init.sql
+supabase/migrations/0002_helpers_and_bootstrap.sql
+supabase/migrations/0003_rls_policies.sql
+supabase/migrations/0004_constraints_and_indexes.sql
+supabase/migrations/0005_rewrite_signed_media_urls.sql
+-- 0006 is intentionally absent (skipped migration slot)
+supabase/migrations/0007_comments_reactions.sql
+supabase/migrations/0008_subscribers.sql
+supabase/migrations/0009_newsletter_sent_at.sql
+supabase/migrations/0010_post_views.sql
+supabase/migrations/0011_save_performance_indexes.sql
+supabase/migrations/0012_analytics_v2.sql
+supabase/migrations/0013_collaboration.sql
+supabase/migrations/0014_sync_contributors.sql
+```
+
+4. In **Storage**, create a private bucket named `blog-media`
+5. In **Auth → URL Configuration**:
+   - Site URL: `http://localhost:3000`
+   - Redirect URLs: `http://localhost:3000/api/auth/callback`, `<your-production-url>/api/auth/callback`
+6. In **Auth → Providers → Google**: paste OAuth client ID + secret from Google Cloud Console
+7. In **Auth → Providers → Email**: enable Magic Link, disable "Confirm email"
+
+### 4. Run locally
+
+```powershell
+npm run dev     # http://localhost:3000
+```
+
+Sign in with your `@convegenius.ai` Google account. The `authorized_users` table (seeded from `APP_AUTHOR_EMAILS` / `APP_MANAGER_EMAIL` on first server action) controls who gets author/manager roles.
+
+### 5. Set up Resend (optional but recommended)
+
+1. Create a [Resend](https://resend.com) account
+2. Verify your domain or use sandbox (`onboarding@resend.dev`)
+3. Create an API key with **Send** permission
+4. Add `RESEND_API_KEY` + `RESEND_FROM` to `.env.local`
+5. After signing in as a manager, visit `/api/admin/newsletter-diagnostics` to confirm configuration
+
+### 6. Set up Upstash (optional)
+
+1. Create an [Upstash](https://upstash.com) Redis database
+2. Copy REST URL + token into `.env.local`
+
+---
+
+## 9. Available Scripts / Commands
+
+| Command | What it does |
 |---|---|
-| `npm run dev` | Start Next.js in dev mode |
-| `npm run build` | Production build (catches type errors) |
-| `npm run lint` | ESLint |
-| `npm run typecheck` | tsc --noEmit |
-| `npm test` | Vitest unit suite |
-| `npm run e2e` | Playwright e2e (requires `AUTH_TEST_BASE_URL`) |
+| `npm run dev` | Start Next.js development server at `http://localhost:3000` |
+| `npm run build` | Production build; catches TypeScript and Next compile errors |
+| `npm start` | Start production server (after `build`) |
+| `npm run typecheck` | Run `tsc --noEmit` — type-check the entire codebase without emitting files |
+| `npm run lint` | Run ESLint via `next lint` — **note: `next lint` was removed in Next 16; run `npx eslint .` directly** |
+| `npm test` | Run Vitest unit suite once |
+| `npm run test:watch` | Run Vitest in watch mode |
+| `npm run e2e` | Run Playwright e2e tests (requires `AUTH_TEST_BASE_URL` pointing at a running instance) |
 
-### First-time Supabase setup
-1. Create a new Supabase project, copy URL + anon + service-role keys
-2. SQL Editor → run migrations 0001 → 0011 **in order**
-3. SQL Editor → run `storage.sql` (creates `blog-media` bucket)
-4. SQL Editor → run `seed.sql` (default tags, weekly template, 5-person allowlist)
-5. **Auth → URL Configuration** → Site URL = `http://localhost:3000`, Redirect URLs = `http://localhost:3000/api/auth/callback` + production URL
-6. **Auth → Providers → Google** — paste OAuth client ID + secret from Google Cloud Console
-7. **Auth → Providers → Email** → enable Magic Link, disable "Confirm email" for one-click sign-in
+### Direct commands (useful in development)
 
-### Resend (recommended for newsletter delivery)
-1. Create a Resend account; verify a domain or use sandbox sender
-2. Create an API key with `Send` permission
-3. Add `RESEND_API_KEY` + `RESEND_FROM` to `.env.local`
-4. Hit `/api/admin/newsletter-diagnostics` after signing in as a manager to confirm config
+```powershell
+# Type-check only
+npx tsc --noEmit
+
+# Lint changed files only
+npx eslint src/... components/... lib/...
+
+# Run a specific unit test file
+npx vitest run tests/unit/collaboration.test.ts
+
+# Run a specific e2e test
+npx playwright test post-contributors
+
+# Trigger the scheduled publish cron locally
+curl -H "Authorization: Bearer $env:CRON_SECRET" http://localhost:3000/api/cron/publish-scheduled
+```
+
+---
+
+## 10. API Documentation
+
+All routes validate inputs with Zod. All authenticated routes check session via Supabase SSR cookies. Service-role operations are server-only.
+
+### Auth
+
+| Method | Path | Auth | Request | Response |
+|---|---|---|---|---|
+| `GET` | `/api/auth/callback?code=&redirect=` | None | `code` (OAuth code), `redirect` (safe path) | 302 to dashboard or `/`; sets session cookie; bootstraps `profiles` row |
+| `POST` | `/api/auth/signout` | Session | none | 302 to `/login`; clears session cookie |
+
+### Media
+
+| Method | Path | Auth | Request | Response |
+|---|---|---|---|---|
+| `POST` | `/api/media/upload` | Author+ | `{ path, fileName, mimeType, sizeBytes, postId? }` | `{ ok, path, signedUrl, mediaType, mediaId }` |
+| `GET` | `/api/media/file?path=<encoded>` | None (published) | path query param | 302 + 50-min cache to signed Supabase URL; 404 if draft/not found |
+| `GET` | `/api/media/signed-url?path=<path>` | Author+ | path query param | `{ ok, signedUrl }` |
+| `GET` | `/api/media/list?postId=<uuid>` | Author+ | postId query | `{ ok, assets: MediaAssetRow[] }` |
+
+**Media upload error codes:** `400` bad MIME/size, `403` wrong owner or reviewer, `429` rate limit exceeded
+
+### Newsletter
+
+| Method | Path | Auth | Request | Response |
+|---|---|---|---|---|
+| `POST` | `/api/subscribe` | None | `{ email, source? }` | `{ ok: true, status: "subscribed"\|"already_subscribed"\|"reactivated" }` |
+| `GET` | `/api/subscribe/unsubscribe?t=<token>` | None | `t` query | HTML confirm page |
+| `POST` | `/api/subscribe/unsubscribe?t=<token>` | None | `t` query | HTML success page |
+
+### Analytics
+
+| Method | Path | Auth | Request | Response |
+|---|---|---|---|---|
+| `POST` | `/api/analytics/post-view` | Session optional | `{ postId, slug?, sessionId, referrer, path, viewportWidth, viewportHeight, isLoggedIn, timeSpentSeconds?, scrollDepth?, readComplete? }` | `{ ok }` |
+| `POST` | `/api/analytics/event` | Session optional | `{ sessionId, eventName, postId?, metadata }` | `{ ok }` |
+
+**Allowed event names:** `page_view`, `post_view`, `subscribe_cta_view`, `subscribe_submit`, `subscribe_success`, `post_share`, `post_react`, `post_comment`, `scroll_depth`
+
+### Edit Locks (Collaboration)
+
+| Method | Path | Auth | Request | Response |
+|---|---|---|---|---|
+| `POST` | `/api/posts/[id]/lock` | Author+ | none | `{ ok, lockedBy: { id, name, avatarUrl }, expiresAt }` on success; `409` with `{ holder: { id, name, avatarUrl } }` if locked by another |
+| `POST` | `/api/posts/[id]/lock/heartbeat` | Author+ (current holder) | none | `{ ok, expiresAt }` on refresh; `409` with new holder if lock was lost |
+| `POST` | `/api/posts/[id]/lock/unlock` | Author+ (holder, owner, or manager) | none | `{ ok }` on success; silently succeeds if lock already gone |
+
+### Social Preview
+
+| Method | Path | Auth | Request | Response |
+|---|---|---|---|---|
+| `GET` | `/api/og-image/[slug]` | None | slug param | 302 to signed cover URL + 1-hour cache; falls back to `/og-default.png` for no-cover or unpublished posts |
+
+### Cron
+
+| Method | Path | Auth | Response |
+|---|---|---|---|
+| `GET` | `/api/cron/publish-scheduled` | `Authorization: Bearer <CRON_SECRET>` | `{ ok, promoted, newsletters, failed, now }` |
+| `GET` | `/api/cron/keep-alive` | `Authorization: Bearer <CRON_SECRET>` | `{ ok }` |
+
+### Admin Diagnostics
+
+| Method | Path | Auth | Response |
+|---|---|---|---|
+| `GET` | `/api/admin/newsletter-diagnostics` | Manager session | `{ ok, resendFrom, isSandbox, subscriberCount, lastError? }` |
+| `POST` | `/monitoring` | None | Sentry browser-event tunnel (configured by `withSentryConfig` in `next.config.mjs`) |
+
+---
+
+## 11. User Roles and Permissions
+
+### Role hierarchy
+
+```mermaid
+graph TD
+  Anon["Anonymous visitor"]
+  Viewer["Viewer\n(any Google account)"]
+  Author["Author\n(approved email)"]
+  Manager["Manager / Admin\n(approved email + manager role)"]
+
+  Anon -->|"signs in"| Viewer
+  Viewer -->|"allowlisted as author"| Author
+  Author -->|"allowlisted as manager"| Manager
+```
+
+### Permissions matrix
+
+| Action | Anonymous | Viewer | Author | Manager |
+|---|---|---|---|---|
+| Read published posts | ✅ | ✅ | ✅ | ✅ |
+| Comment on published posts | ❌ | ✅ | ✅ | ✅ |
+| React to posts | ❌ | ✅ | ✅ | ✅ |
+| Subscribe to newsletter | ✅ | ✅ | ✅ | ✅ (hidden CTA) |
+| Create a new post | ❌ | ❌ | ✅ | ✅ |
+| Edit own post | ❌ | ❌ | ✅ | ✅ |
+| Edit any post | ❌ | ❌ | ❌ | ✅ |
+| Publish own post | ❌ | ❌ | ✅ (or submit for review) | ✅ |
+| Soft-delete own post | ❌ | ❌ | ✅ | ✅ |
+| Permanently delete | ❌ | ❌ | ✅ (own archived) | ✅ (any archived) |
+| Upload media | ❌ | ❌ | ✅ | ✅ |
+| Delete own comments | ❌ | ✅ | ✅ | ✅ |
+| Delete any comment | ❌ | ❌ | ✅ (own posts only) | ✅ |
+| Invite collaborators | ❌ | ❌ | ✅ (own posts only) | ✅ |
+| Edit as collaborator (editor role) | ❌ | ❌ | ✅ (invited) | ✅ (invited) |
+| Review as collaborator (reviewer role) | ❌ | ❌ | ✅ (invited) | ✅ (invited) |
+| Force-release edit lock | ❌ | ❌ | ❌ | ✅ |
+| Access `/admin/*` | ❌ | ❌ | ❌ | ✅ |
+| Manage allowlist / tags / schedule | ❌ | ❌ | ❌ | ✅ |
+| View subscriber list | ❌ | ❌ | ❌ | ✅ |
+| Change post status of any post | ❌ | ❌ | ❌ | ✅ |
+
+### Collaborator sub-roles (within a draft)
+
+When a post owner invites a collaborator:
+
+| Sub-role | Can edit post content | Can add review comments | Can resolve review comments | Can view the draft |
+|---|---|---|---|---|
+| `editor` | ✅ (if not locked by someone else) | ✅ | ✅ (own comments + owner/manager) | ✅ |
+| `reviewer` | ❌ | ✅ | ✅ (own comments + owner/manager) | ✅ |
+
+### Enforcement layers
+
+Defense in depth — every layer independently enforces access:
+
+1. **Next.js middleware** (`middleware.ts` + `lib/supabase/middleware.ts`) — refreshes Supabase SSR cookies; canonicalizes the host; gates non-public routes by session presence
+2. **Page guards** (`lib/auth/guards.ts`) — `requireSession()`, `requireAuthor()`, `requireManager()` redirect unauthorized users
+3. **Server actions** — every mutation starts with Zod input validation + a `require*` guard + ownership check
+4. **Supabase RLS** — security-definer helper functions gate every table row; a separate set of collaboration helpers prevents policy recursion
+5. **`tg_posts_protect_author` trigger** — DB-level guard preventing `author_id` changes by non-managers (closes the ownership-hijack hole where a collaborator update policy could be exploited)
+6. **Service-role isolation** — `SUPABASE_SERVICE_ROLE_KEY` is only used inside `createSupabaseServiceClient()` in `lib/supabase/server.ts`; never exposed to the browser bundle
+
+---
+
+## 12. Core User Flows
+
+### Onboarding a new editor
+
+```mermaid
+sequenceDiagram
+  participant Admin
+  participant UI as /admin/users
+  participant DB as Supabase
+  participant NewEditor as New Editor
+
+  Admin->>UI: Opens /admin/users
+  Admin->>UI: Enters email, selects role Author
+  UI->>DB: upsertAuthorizedUser(email, role)
+  DB-->>UI: { ok }
+  NewEditor->>UI: Visits /login, signs in with Google
+  UI->>DB: /api/auth/callback → bootstrap_profile()
+  DB-->>UI: profile row created with role='author'
+  NewEditor->>UI: Redirected to /dashboard
+```
+
+### Publishing a post (single author)
+
+```mermaid
+sequenceDiagram
+  participant Author
+  participant Editor as /editor/[id]
+  participant Action as savePost()
+  participant DB as Supabase
+  participant Newsletter as Resend
+
+  Author->>Editor: Opens /editor/new (or existing draft)
+  Editor->>DB: Autosave every 15s (status='draft')
+  Author->>Editor: Clicks "Post Now"
+  Editor->>Action: savePost({ status:'published', ... })
+  Action->>DB: UPDATE posts SET status='published', published_at=now()
+  Action->>DB: syncPostContributors(postId)
+  Action->>DB: cleanupReviewArtifacts(postId) — delete locks + review comments
+  Action->>Action: revalidatePath + updateTag("public-feed")
+  Action->>Newsletter: sendPerPostNewsletter(postId) — async, idempotent
+  Newsletter->>DB: UPDATE posts SET newsletter_sent_at=now() WHERE newsletter_sent_at IS NULL
+  Newsletter->>Resend: sendEmail() per active subscriber
+  Action-->>Editor: { ok: true }
+```
+
+### Collaborative editing flow
+
+```mermaid
+sequenceDiagram
+  participant Owner
+  participant Editor as /editor/[id]
+  participant CollabPanel as CollaboratorsPanel
+  participant Collaborator
+  participant LockAPI as /api/posts/[id]/lock
+
+  Owner->>CollabPanel: Invites Aryan as "editor"
+  CollabPanel->>Editor: inviteCollaborator(postId, userId, 'editor')
+  Editor->>CollabPanel: Shows Aryan in collaborators list
+
+  Collaborator->>Editor: Opens /editor/[id]
+  Editor->>LockAPI: POST /lock (acquire)
+  LockAPI-->>Editor: { ok, lockedBy: Aryan, expiresAt }
+  Editor->>Editor: Shows "You are editing" banner; starts 60s heartbeat
+  Editor->>LockAPI: POST /lock/heartbeat every 60s
+
+  Owner->>Editor: Opens same /editor/[id] simultaneously
+  Editor->>LockAPI: POST /lock (try acquire)
+  LockAPI-->>Editor: 409 { holder: { id: Aryan, name: "Aryan Singh", avatarUrl } }
+  Editor->>Editor: Shows "Locked by Aryan Singh" banner + Take Over button
+
+  Collaborator->>Editor: Closes tab (pagehide event)
+  Editor->>LockAPI: POST /lock/unlock (sendBeacon / keepalive)
+  LockAPI-->>Editor: { ok }
+```
+
+### Newsletter subscribe
+
+```mermaid
+sequenceDiagram
+  participant Visitor
+  participant Subscribe as /api/subscribe
+  participant DB as Supabase
+  participant Email as Resend
+
+  Visitor->>Subscribe: POST { email: "fan@example.com", source: "post_end" }
+  Subscribe->>Subscribe: checkRateLimit (5/60s per IP)
+  Subscribe->>DB: SELECT * FROM subscribers WHERE email = $1
+  alt New subscriber
+    Subscribe->>DB: INSERT INTO subscribers (email, unsubscribe_token)
+    Subscribe->>Email: sendEmail(welcomeTemplate)
+    Subscribe-->>Visitor: { ok: true, status: "subscribed" }
+  else Previously unsubscribed
+    Subscribe->>DB: UPDATE subscribers SET unsubscribed_at=null, token=gen_random_uuid()
+    Subscribe->>Email: sendEmail(welcomeTemplate)
+    Subscribe-->>Visitor: { ok: true, status: "reactivated" }
+  else Already active
+    Subscribe-->>Visitor: { ok: true, status: "already_subscribed" }
+  end
+```
+
+---
+
+## 13. Feature Limitations and Known Gaps
+
+| Limitation | Impact | Status / Workaround |
+|---|---|---|
+| **Edit lock is advisory, not DB-enforced** | A concurrent request that bypasses the editor could still write; enforced only in `savePost()` | Acceptable for internal 5-author team; add a DB constraint or optimistic-locking version column if external APIs open |
+| **Lock is heartbeat-based, not WebSocket** | If a tab crashes mid-edit without a pagehide event, the lock holds for up to 5 minutes | Owner/manager can force-release via the Take Over banner; use `navigator.sendBeacon` on `visibilitychange` as fallback |
+| **MIME validation trusts the browser-provided content-type** | A renamed file could bypass MIME checks | Acceptable for an internal team; migrate to magic-byte sniffing if uploads ever open to externals |
+| **No comment rate-limiting** | A logged-in user could post many comments rapidly | Subscribe and media registration are Upstash-limited; add a comment limiter if abuse appears |
+| **Single-region Supabase** | >200ms latency for users far from the Supabase region | Public reads cache aggressively via ISR; writes are infrequent |
+| **Search is in-memory, client-side filtering** | Doesn't scale past ~500 posts | Switch to a `tsvector` column + GIN index when catalog grows |
+| **Resend sandbox sender limitation** | `onboarding@resend.dev` only delivers to the Resend account owner | Verify a domain in Resend, switch `RESEND_FROM` |
+| **Post detail page is `force-dynamic`** | Can't ISR-cache because user reactions are mixed in | Future work: wrap post body in `unstable_cache`, render reactions in a client component |
+| **30-day retention cron not yet wired** | Archived posts live until manually permanently deleted | Build `/api/cron/cleanup-archived` and add to `vercel.json` |
+| **Rate limiting degrades open when Upstash is missing** | Subscribe + media limits become no-ops | `instrumentation.ts` warns in production; set Upstash env vars before launch |
+| **`npm run lint` broken in Next 16** | `next lint` was removed; the npm script fails | Run `npx eslint .` directly |
+| **Sentry source-map upload requires auth token** | Upload step emits a non-fatal error during `npm run build` when `SENTRY_AUTH_TOKEN` is not set | Set `SENTRY_AUTH_TOKEN=""` to silence the error; set the real value in Vercel for production source maps |
+| **Vercel free-tier magic-link email throttle** | Supabase built-in email sender is throttled at ~30/day | Google OAuth bypasses email entirely; Resend handles newsletter at higher volume |
+| **Per-file upload cap** | 50 MB on Supabase free-tier bucket default | Upgrade Supabase plan and raise `NEXT_PUBLIC_MAX_*_UPLOAD_MB` together |
+| **`/api/media/file` re-signs on every uncached fetch** | Minor Supabase Storage cost per uncached video play | Mitigated by the 50-minute browser cache |
+
+---
+
+## 14. Testing
+
+### Framework
+
+| Type | Tool | Config |
+|---|---|---|
+| Unit tests | **Vitest 4** + jsdom | `vitest.config.ts` — `environment: "jsdom"`, `globals: true` |
+| E2E tests | **Playwright 1.47** | `playwright.config.ts` — `testDir: ./tests/e2e` |
+
+### Unit test coverage (`tests/unit/`)
+
+| File | What it covers |
+|---|---|
+| `collaboration.test.ts` | `deriveAccess()` permission matrix (owner/manager/editor/reviewer/none/null-author), `isLockActive()`, lock constants, `isCollaboratorRole()` |
+| `demo-counter-copy.test.ts` | Simulated watching-counter formatting logic |
+| `embeds.test.ts` | `isEmbedUrl()` and `embedAstFromUrl()` — YouTube, Vimeo, Loom, Google Drive URL detection |
+| `file-validation.test.ts` | `classifyMime()` MIME allow-list checks; `validateFile()` size + type rejection |
+| `names.test.ts` | `getFirstName()` — first-token extraction, whitespace handling, null/undefined/empty → `"CG"` fallback |
+| `read-time.test.ts` | `readTimeFromHtml()` — 220 wpm calculation, empty HTML, short passages |
+| `roles.test.ts` | `roleLabel()`, role comparison helpers |
+| `sanitize.test.ts` | `sanitizeHtml()` — script tag stripping, event handler removal, `javascript:` URL blocking, iframe allow-list |
+| `slugs.test.ts` | `slugify()` — unicode, special chars; `withSuffix()` collision handling |
+
+**Run:**
+```powershell
+npm test            # all unit tests, single run
+npm run test:watch  # watch mode
+```
+
+### E2E tests (`tests/e2e/`)
+
+| File | What it covers | Environment needed |
+|---|---|---|
+| `auth.spec.ts` | Login page renders Google OAuth + magic-link controls; unauthenticated redirect to `/login`; `/unauthorized` page reachable | `AUTH_TEST_BASE_URL` |
+| `post-contributors.spec.ts` | All contributor first names visible; no `@convegenius.ai` emails in byline; no mobile horizontal overflow; avatars/initials render | `AUTH_TEST_BASE_URL`, `CONTRIBUTORS_TEST_SLUG`, `CONTRIBUTORS_TEST_NAMES` |
+
+**Run:**
+```powershell
+$env:AUTH_TEST_BASE_URL = "https://convegenius-blog.vercel.app"
+$env:CONTRIBUTORS_TEST_SLUG = "decoding-claude"
+$env:CONTRIBUTORS_TEST_NAMES = "Sumit,Aryan,Insha"
+npm run e2e
+# or a single test:
+npx playwright test post-contributors
+```
+
+The `post-contributors` spec self-skips unless `CONTRIBUTORS_TEST_SLUG` is set, so `npm run e2e` in CI without that env var only runs `auth.spec.ts`.
+
+### Manual QA checklist
+
+**Collaboration feature:**
+- [ ] Invite a collaborator as `editor` → they appear in Collaborators panel with Editor badge
+- [ ] Collaborating editor can open the post and acquire the edit lock
+- [ ] Post owner sees "Locked by [name]" banner while editor holds lock
+- [ ] Owner can force-release lock via "Take Over" button
+- [ ] Reviewer can open post but editor toolbar is hidden + "Reviewer mode" banner shows
+- [ ] Reviewer can add/resolve review comments; owner can see + delete them
+- [ ] All review comments + lock removed on publish
+- [ ] Removed editor loses public contributor credit after the post is re-saved
+
+**Co-author byline:**
+- [ ] Multi-author post shows all contributor first names with avatars
+- [ ] Single-author post shows the original single-author layout (no regression)
+- [ ] No email addresses appear in the byline
+- [ ] Mobile 375px viewport — contributor row wraps without horizontal scroll
+- [ ] Light and dark themes — names + avatars readable in both
 
 ---
 
@@ -735,222 +1216,292 @@ npm run dev                    # http://localhost:3000
 Hosted on Vercel from the `main` branch.
 
 ### One-time setup
+
 1. Import the GitHub repo into Vercel
-2. Add env vars (see § 16)
-3. Set the production domain
-4. Vercel detects `vercel.json` and registers the cron jobs
+2. Add all required environment variables (§ 7) in Vercel Project Settings
+3. Set the production domain (e.g., `convegenius-blog.vercel.app`)
+4. Vercel reads `vercel.json` and registers cron jobs automatically
 
 ### Deploy flow
-- Push to `main` → Vercel auto-builds and promotes to production
-- Preview deployments on generated Vercel hosts 308-redirect to the canonical production host
-- Daily cron `/api/cron/publish-scheduled` at `0 9 * * *`
-- Daily cron `/api/cron/keep-alive` at `0 6 * * *`
 
-### Canonical URL redirect
-`proxy.ts` 308-redirects any non-localhost, non-canonical host to `NEXT_PUBLIC_APP_URL`. Keeps cookies pinned to one host and prevents preview-host OG issues.
-
----
-
-## 16. Environment variables
-
-### Required
-
-| Variable | Where | Notes |
-|---|---|---|
-| `NEXT_PUBLIC_APP_URL` | both | `https://convegenius-blog.vercel.app` (no trailing slash) |
-| `NEXT_PUBLIC_SUPABASE_URL` | both | from Supabase project settings |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | both | anon/publishable key |
-| `SUPABASE_SERVICE_ROLE_KEY` | **server only** | never expose to browser |
-| `APP_ALLOWED_EMAIL_DOMAIN` | both | `convegenius.ai` |
-| `APP_MANAGER_EMAIL` | both | comma-separated admin emails |
-| `APP_AUTHOR_EMAILS` | both | comma-separated author emails |
-| `CRON_SECRET` | server | random string, at least 24 chars in production; Vercel uses it to authenticate scheduled jobs |
-| `RESEND_API_KEY` | server | Resend transactional email key |
-| `RESEND_FROM` | server | `onboarding@resend.dev` (sandbox) or `newsletter@<your-domain>` (verified) |
-
-### Optional
-
-| Variable | Default | Notes |
-|---|---|---|
-| `NEXT_PUBLIC_REQUIRE_MANAGER_REVIEW` | `false` | If `true`, author Post Now becomes "Submit for review" with `status = submitted` |
-| `NEXT_PUBLIC_MAX_UPLOAD_MB` | `50` | Per-file image upload cap |
-| `NEXT_PUBLIC_MAX_VIDEO_UPLOAD_MB` | `50` | Per-file video upload cap (free Supabase tier max) |
-| `NEXT_PUBLIC_MAX_AUDIO_UPLOAD_MB` | `50` | Per-file audio upload cap |
-| `NEXT_PUBLIC_ENABLE_DEMO_WATCHING_COUNTER` | `false` | Shows the explicitly-labelled simulated public-nav activity pill |
-| `UPSTASH_REDIS_REST_URL` | unset | Enables rate limiting when paired with token; production boot warns if missing |
-| `UPSTASH_REDIS_REST_TOKEN` | unset | Enables rate limiting when paired with URL; production boot warns if missing |
-| `NEXT_PUBLIC_SENTRY_DSN` | unset | Browser Sentry capture; production boot warns if missing |
-| `SENTRY_DSN` | unset | Server/edge Sentry capture; falls back to public DSN when absent |
-| `SENTRY_ORG` / `SENTRY_PROJECT` / `SENTRY_AUTH_TOKEN` | unset | Enables Sentry source-map upload during Vercel builds |
-
----
-
-## 17. Operations playbook
-
-### Add a new editor
-1. Add their email to `APP_AUTHOR_EMAILS` (or `APP_MANAGER_EMAIL`) in Vercel env vars + redeploy
-2. Add via `/admin/users` UI after they sign in once OR add to `seed.sql`
-3. Next sign-in, their profile gets the new role automatically
-4. If you want them in the contributor grid order, set their `displayOrder` in `lib/team.ts`
-
-### Remove an editor
-1. `/admin/users` → click trash on their row (refuses if it'd remove the last admin)
-2. Their `authorized_users` row is deleted; `profiles.role` drops to `viewer`
-3. They can still log in to comment + react, just lose editor access
-
-### Restore an archived post
-1. As editor, `/me/posts` → Trash panel
-2. Click **Restore** — post goes back to `draft`
-
-### Manually trigger the publish-scheduled cron
-```powershell
-curl -H "Authorization: Bearer $env:CRON_SECRET" `
-  "https://convegenius-blog.vercel.app/api/cron/publish-scheduled"
+```
+git push origin main
+  → Vercel detects push
+  → runs npm run build
+  → promotes to production
+  → registers /api/cron/* at declared schedules
 ```
 
-### Investigate a missing newsletter delivery
-1. Sign in as a manager, hit `/api/admin/newsletter-diagnostics`
-2. Check sandbox flag (Resend sandbox sender = only owner gets mail)
-3. Check `posts.newsletter_sent_at` in Supabase — if non-null, the send claim was made
-4. Check Resend dashboard's logs for delivery status / bounces
-5. See `docs/newsletter-delivery-debug.md` for the full runbook
+Preview deployments on `*.vercel.app` hosts automatically 308-redirect to `NEXT_PUBLIC_APP_URL` (via `middleware.ts`) to prevent cookie + OG issues.
 
-### Delete a comment as admin
-1. Open the post detail page
-2. Hover the offending comment → trash icon appears next to author name
-3. Click → soft-deleted, removed from public view immediately
+### vercel.json crons
 
-### Switch into view-as-member mode
-- Click the "View as member" pill (top-right of nav)
-- Yellow banner appears; all admin/author UI hides
-- Click "Exit view mode" in banner or pill to return
+```json
+{
+  "crons": [
+    { "path": "/api/cron/publish-scheduled", "schedule": "0 9 * * *" },
+    { "path": "/api/cron/keep-alive",         "schedule": "0 6 * * *" }
+  ]
+}
+```
 
-### Change the contributor order
-1. Edit `displayOrder` numbers in `lib/team.ts`
-2. Deploy — `updateTag("public-feed")` happens automatically on the next editor/admin mutation; force-refresh by triggering any post-related write or wait up to 60 seconds for ISR
+### Post-deployment verification
 
----
+```powershell
+# 1. Verify auth
+curl https://convegenius-blog.vercel.app/login
 
-## 18. Known limitations
+# 2. Verify public feed
+curl https://convegenius-blog.vercel.app/
 
-| Limitation | Impact | Workaround / status |
-|---|---|---|
-| **MIME validation trusts the browser** | An attacker could rename `evil.exe` to `cat.png`; server doesn't sniff bytes | Acceptable for an internal 5-author team. Migrate to magic-byte sniffing if uploads ever open to externals. |
-| **No comment rate-limiting** | A spammer could in theory post 100 comments fast | Subscribe and media registration are rate-limited via Upstash; add a comments limiter if abuse appears. |
-| **Single-region Supabase** | Latency > 200ms for users far from the Supabase region | Acceptable — public reads cache aggressively via ISR; writes are infrequent. |
-| **Vercel free tier email throttling** | Magic-link emails throttled to ~30/day from Supabase's built-in sender | Workaround: Google OAuth bypasses email entirely. Resend handles newsletter mail at higher volume. |
-| **Search is in-memory filtering over titles + excerpts** | Fetch-then-filter doesn't scale past ~500 posts | Switch to a `tsvector` column + GIN index when corpus grows. |
-| **Resend sandbox sender** | `onboarding@resend.dev` only delivers to the Resend account owner | Verify a domain in Resend to fan out to all subscribers. |
-| **Per-file upload cap** | 50 MB on Supabase free tier | Upgrade the Supabase plan / bucket object limit and raise the matching `NEXT_PUBLIC_MAX_*_UPLOAD_MB` env caps together. |
-| **Post detail page is `force-dynamic`** | Mixes user-specific reactions; can't ISR-cache without splitting public vs user-specific renders | Future work — wrap `getPublicPostBySlug` in `unstable_cache`, render user reactions in a small client component. |
-| **No client-side cache library** | No SWR, no React Query | Intentional — server components + ISR cover the SWR pattern for public reads. Adopt SWR only when a heavy client dashboard appears. |
-| **`/api/media/file` re-signs every uncached fetch** | Modest Supabase Storage cost per uncached video play | Mitigated by 50-minute browser cache; signed URLs are cheap. |
-| **30-day retention cron not yet wired** | Archived posts live forever until manually deleted | Build `/api/cron/cleanup-archived` and add a `vercel.json` cron entry. |
-| **Rate limiting degrades open when Upstash is missing** | Subscribe + media-registration limits become no-ops in local/dev or misconfigured envs | `instrumentation.ts` warns in production; set both Upstash REST env vars before launch. |
+# 3. Verify newsletter config (sign in as manager first)
+curl https://convegenius-blog.vercel.app/api/admin/newsletter-diagnostics
 
----
+# 4. Trigger publish-scheduled cron manually
+curl -H "Authorization: Bearer $env:CRON_SECRET" `
+  https://convegenius-blog.vercel.app/api/cron/publish-scheduled
+```
 
-## 19. Future scope
+### Database migration on deploy
 
-- **Post-detail page caching** — split public + user-specific renders so the post body can ISR
-- **Offline reader** — service worker caches the last 10 visited posts' HTML so first-time WhatsApp arrivals work in flight mode
-- **SWR adoption** — only justified when a heavy client dashboard appears (realtime drafts list, multi-user editor presence)
-- **Full-text search** — Postgres `tsvector` + GIN index once the catalog grows past 500 posts
-- **Image versioning** — versioned filenames + `Cache-Control: immutable` for ultra-long cache when thumbnails are updated
-- **Webhooks for downstream tools** — Slack notification on publish, Notion mirror, RSS feed
-- **Multi-author drafts** — collaborative editing via TipTap collaboration + Y.js + Supabase Realtime
-- **Drafts versioning** — `post_revisions` table snapshot on each save with rollback UI
-- **30-day retention cron** — build `/api/cron/cleanup-archived` + add it to `vercel.json`
-- **Real presence counter** — replace the opt-in simulated `DemoWatchingCounter` with Supabase Realtime presence if live readership becomes useful
-- **Magic-byte MIME sniffing** for upload validation
-- **Comment threading** — single-level replies, capped at 2 deep
-- **Read-time progress bar** — fixed-top scroll-progress strip on long posts
+Migrations are **not** auto-applied on Vercel deploy. Apply new migrations manually via the Supabase SQL Editor or Supabase CLI before or after deploying the app:
+
+```powershell
+# Via Supabase CLI (requires supabase login + linked project)
+supabase db push
+```
 
 ---
 
-## 20. Troubleshooting
+## 16. Troubleshooting
 
 ### "No API key found in request" on login
-**Cause:** `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` missing at build time.
-**Fix:** `NEXT_PUBLIC_*` vars are baked into the bundle; add the key in Vercel, redeploy.
+**Cause:** `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is missing at build time — `NEXT_PUBLIC_*` vars are baked into the bundle.
+**Fix:** Add the var in Vercel → Project Settings → Environment Variables, then redeploy.
 
 ### Card thumbnail / OG image broken on WhatsApp / Slack
-**Cause:** crawler cached an expired Supabase signed URL.
-**Fix:** The OG proxy at `/api/og-image/[slug]` 302-redirects to a fresh signed URL each hit; crawlers cache the resolved bytes. If preview was cached with a direct signed URL from before the proxy existed, append `?v=2` to the shared URL once to force a fresh fetch. See `docs/social-preview-thumbnail-fix.md`.
+**Cause:** Crawler cached an expired Supabase signed URL from before the OG proxy existed.
+**Fix:** The proxy at `/api/og-image/[slug]` 302-redirects to a fresh signed URL on every hit. Append `?v=2` to a shared link once to force a fresh crawler fetch. See `docs/social-preview-thumbnail-fix.md`.
 
 ### Newsletter sent to only one address
 **Cause:** Resend sandbox sender (`onboarding@resend.dev`) only delivers to the Resend account owner.
 **Fix:** Verify a domain in Resend, switch `RESEND_FROM` to `newsletter@<your-domain>`. See `docs/newsletter-delivery-debug.md`.
 
 ### Subscribe or media upload returns 429
-**Cause:** Upstash rate limiting is active. Subscribe is limited to 5 attempts / 60 s per IP; media registration is limited to 30 uploads / 60 s per signed-in user.
-**Fix:** Wait for the reset time in `X-RateLimit-Reset`. If limits feel too tight for production behavior, adjust `lib/ratelimit.ts`.
+**Cause:** Upstash rate limiting is active (subscribe: 5/60s per IP; media upload: 30/60s per user).
+**Fix:** Wait for `X-RateLimit-Reset`. Adjust `lib/ratelimit.ts` if limits feel too tight.
+
+### Locked editor banner doesn't go away after the other person left
+**Cause:** Lock has a 5-minute TTL; if the tab closed without triggering `pagehide`, the lock persists until it expires.
+**Fix:** Manager can click "Take Over" in the lock banner to force-release, or wait up to 5 minutes.
 
 ### Editor toolbar not sticky on long drafts
-**Status:** Fixed. Root cause was `.portal-panel` setting `overflow: hidden`, which interrupts `position: sticky`. Fix moved the toolbar OUTSIDE the Card as a sibling. See `docs/editor-toolbar-layout-fix.md`.
+**Status:** Fixed. Root cause was `.portal-panel` setting `overflow: hidden`, which interrupts `position: sticky`. The toolbar was moved outside the Card as a sibling. See `docs/editor-toolbar-layout-fix.md`.
 
 ### Video upload fails with "FUNCTION_PAYLOAD_TOO_LARGE"
 **Cause:** Vercel function payload cap is 4.5 MB.
-**Fix:** Direct upload helper (`lib/media/direct-upload.ts`) PUTs the file straight to Supabase Storage from the browser, sidestepping Vercel entirely. Already wired in the editor.
+**Fix:** The direct-upload helper (`lib/media/direct-upload.ts`) PUTs file bytes straight to Supabase Storage from the browser, bypassing Vercel entirely. Already wired in the editor.
 
 ### YouTube embed shows error 153 for unlisted videos
-**Cause:** `referrerpolicy="no-referrer"` strips the Referer header YouTube needs to verify unlisted access.
-**Fix:** Switched to `referrerpolicy="strict-origin-when-cross-origin"` in both `EmbedBlock` and the sanitizer. Already deployed.
+**Cause:** Old `referrerpolicy="no-referrer"` stripped the Referer header YouTube needs.
+**Fix:** Switched to `referrerpolicy="strict-origin-when-cross-origin"` in `EmbedBlock` and `sanitize.ts`. Already deployed.
 
-### Landing page shows stale post counts
-**Cause:** ISR 60-second TTL; some non-write event (a new view) hasn't triggered revalidation yet.
-**Fix:** Counts on cards lag by ≤60 seconds by design. Post-detail page itself shows live counts. If urgent, trigger any publish or admin write to flush the `public-feed` tag.
-
-### `revalidate` doesn't seem to invalidate after publish
-**Check:** editor/admin server actions call **both** `revalidatePath` AND `updateTag("public-feed")`. The scheduled-publish route handler calls `revalidateTag("public-feed", "default")`. The `unstable_cache` entries are only invalidated by the tag; path-only invalidation won't bust them.
-
-### Production refuses to boot with `[instrumentation]`
-**Cause:** `instrumentation.ts` detected missing required production env vars or a `CRON_SECRET` shorter than 24 characters.
-**Fix:** Add the missing env vars in Vercel and redeploy. For the cron secret, generate a longer value, for example `openssl rand -hex 32`.
+### Production refuses to boot with `[instrumentation]` warning
+**Cause:** `instrumentation.ts` detected missing required env vars or a `CRON_SECRET` shorter than 24 chars.
+**Fix:** Add the missing vars in Vercel; for the cron secret, run `openssl rand -hex 32`.
 
 ### Pre-hydration theme flash
-**Status:** Fixed. `<ThemeScript />` runs synchronously as the first child of `<body>` so `data-theme` is stamped before paint, defaulting to light unless `cg_signal_theme` says dark. `suppressHydrationWarning` on `<html>` silences React's mismatch warning since the script intentionally mutates the DOM before React mounts.
+**Status:** Fixed. `<ThemeScript />` runs synchronously as the first `<body>` child, stamps `data-theme` before React mounts, defaults to light. `suppressHydrationWarning` on `<html>` silences the expected mismatch. See `docs/theme-system.md`.
 
-### Sticky page wider than viewport on mobile
-**Cause:** flex container without `min-w-0` letting an inner element force its intrinsic width.
-**Fix:** add `min-w-0` to flex children. See `docs/mobile-spacing-fixes.md` for the catalog of fixes.
+### Page wider than viewport on mobile
+**Cause:** Flex container missing `min-w-0` on a child element that expands to its intrinsic width.
+**Fix:** Add `min-w-0` to the flex child. See `docs/mobile-spacing-fixes.md`.
 
-### Editor crashes loading an old post with raw `<audio>` / `<video>` HTML
-**Cause:** TipTap schema doesn't know `<audio>`/`<video>` by default; the HTML parser drops them and ProseMirror complains.
-**Fix:** Custom `AudioBlock` / `VideoBlock` / `EmbedBlock` Node extensions in `lib/editor/media-extensions.ts` add schema support. Already deployed.
+### `npm run lint` fails with "no such directory: .../lint"
+**Cause:** `next lint` was removed in Next 16; the `lint` npm script still calls it.
+**Fix:** Run `npx eslint .` directly instead.
+
+### Sentry source-map upload error during `npm run build`
+**Cause:** `SENTRY_AUTH_TOKEN` is not set; Sentry's Next.js plugin attempts upload and fails.
+**Impact:** Non-fatal — build still exits 0 and the app works. Source maps won't appear in Sentry.
+**Fix:** Set `SENTRY_AUTH_TOKEN=""` to silence locally; add the real token in Vercel for production.
 
 ### "Only plain objects can be passed to Server Actions"
-**Cause:** TipTap's `getJSON()` can return objects with non-`Object.prototype` ancestry, which Next's Server Action serializer rejects.
-**Fix:** `JSON.parse(JSON.stringify(editor.getJSON()))` strips prototypes. Already in `handleSave`.
+**Cause:** TipTap's `getJSON()` returns objects with non-`Object.prototype` ancestry that Next's serializer rejects.
+**Fix:** `JSON.parse(JSON.stringify(editor.getJSON()))` already wraps `handleSave`. This error appearing again means TipTap was updated with a new non-plain node type — add it to the chain.
 
 ---
 
-## Docs index
+## 17. Contribution Guidelines
 
-Living docs for ops + audit history live in `docs/`:
+### Branch naming
+
+```
+feat/short-description       # new feature
+fix/short-description        # bug fix
+chore/short-description      # tooling, deps, cleanup
+docs/short-description       # documentation only
+```
+
+All branches are off `main`; PRs merge back to `main`.
+
+### Before submitting a PR
+
+- [ ] `npx tsc --noEmit` — zero type errors
+- [ ] `npx eslint <changed-files>` — zero lint errors; no `any`, no `// eslint-disable` without a reason comment
+- [ ] `npm test` — 48 tests pass (add new tests for new logic)
+- [ ] `npm run build` — production build exits 0
+
+### Code conventions
+
+- **No `any`** — use proper types or `unknown` + narrowing
+- **No comments explaining what code does** — name things well instead; only add a comment when the WHY is non-obvious (a constraint, invariant, or known bug)
+- **Server actions return `{ ok: boolean; error?: string }`** — never throw across the wire
+- **Public reads use the service-role client** in `lib/db/public.ts`, hard-pinned to `status='published'`
+- **Every mutation invalidates both** `revalidatePath(surface)` AND `updateTag("public-feed")`
+- **Zod on every server action input** — validate at the boundary, trust internals
+- **Security definer helpers for RLS** — never write a policy that reads another RLS-protected table directly (causes recursion)
+
+### Adding a new database table
+
+1. Create a new migration file `supabase/migrations/NNNN_description.sql`
+2. Add the table definition + indexes + RLS policies
+3. Add corresponding row types to `lib/db/types.ts`
+4. Apply the migration to the Supabase project via SQL Editor or `supabase db push`
+
+### Adding a new server action
+
+```ts
+"use server";
+import { requireAuthor } from "@/lib/auth/guards";
+import { z } from "zod";
+
+const InputSchema = z.object({ /* ... */ });
+
+export async function myAction(raw: z.infer<typeof InputSchema>) {
+  const parsed = InputSchema.safeParse(raw);
+  if (!parsed.success) return { ok: false, error: "Invalid input" };
+
+  const { userId, role } = await requireAuthor();  // redirects if not author
+  // ... ownership check, mutation, revalidation
+  return { ok: true };
+}
+```
+
+### Documentation expectations
+
+- For features with user-facing behavior changes: update this README (the relevant capability section + any affected tables)
+- For architectural decisions or non-obvious design choices: add or update a file in `docs/`
+- For schema changes: update the [Database Schema](#6-database-schema) section
+
+---
+
+## 18. Operations Playbook
+
+### Add a new editor
+
+1. Add their email to `APP_AUTHOR_EMAILS` (or `APP_MANAGER_EMAIL`) in Vercel env vars + redeploy
+2. Use `/admin/users` to add them via the UI after they sign in once (or add to a seed migration)
+3. On their next sign-in, `bootstrap_profile()` consults `authorized_users` and grants the new role automatically
+4. If they should appear in the contributors grid, add an entry to `lib/team.ts`
+
+### Remove an editor
+
+1. `/admin/users` → click trash on their row (refuses if it would remove the last admin)
+2. Their `profiles.role` drops to `viewer`; they can still log in to comment + react
+3. Any posts they co-authored retain their contributor credit unless manually cleaned
+
+### Restore an archived post
+
+1. `/me/posts` → Trash panel → **Restore** → post returns to `draft`
+
+### Manually trigger the publish-scheduled cron
+
+```powershell
+curl -H "Authorization: Bearer $env:CRON_SECRET" `
+  "https://convegenius-blog.vercel.app/api/cron/publish-scheduled"
+```
+
+### Investigate a missing newsletter delivery
+
+1. Sign in as a manager → `/api/admin/newsletter-diagnostics`
+2. Check sandbox flag (Resend sandbox = only owner gets mail)
+3. Check `posts.newsletter_sent_at` in Supabase — non-null means the send was attempted
+4. Check Resend dashboard logs for delivery status / bounces
+5. See `docs/newsletter-delivery-debug.md` for the full runbook
+
+### Force-release an edit lock
+
+As a manager: open the locked post in `/editor/[id]` → the "Locked by [name]" banner shows a **Take Over** button → click it → `POST /api/posts/[id]/lock` overwrites the lock.
+
+### Change the contributor display order
+
+1. Edit `displayOrder` numbers in `lib/team.ts`
+2. Deploy — `updateTag("public-feed")` is triggered on the next editor/admin write; force-refresh by triggering any post-related mutation or wait up to 60 seconds for ISR
+
+### Delete a comment as admin
+
+Open the post → hover the comment → click the trash icon → soft-deleted immediately
+
+### Switch into view-as-member mode
+
+Click **"View as member"** in the top nav (top-right). Yellow banner appears; all admin/author UI hides. Click **"Exit view mode"** in the banner or nav pill to return.
+
+---
+
+## 19. Future Scope
+
+| Idea | Status |
+|---|---|
+| Post-detail page caching | Pending — split public body + user-specific reactions into separate renders so body can ISR |
+| 30-day retention cron | Pending — build `/api/cron/cleanup-archived` + `vercel.json` entry |
+| Full-text search | Pending — Postgres `tsvector` + GIN index once catalog grows past ~500 posts |
+| Image versioning | Pending — versioned filenames + `Cache-Control: immutable` for ultra-long cache on thumbnail updates |
+| Comment threading | Pending — single-level replies, max 2 deep |
+| Offline reader | Pending — service worker caches last 10 visited posts |
+| Post revisions / history | Pending — `post_revisions` table snapshot on each save with rollback UI |
+| Real presence counter | Pending — replace opt-in simulated `DemoWatchingCounter` with Supabase Realtime presence |
+| RSS feed | Pending |
+| Webhooks for downstream tools | Pending — Slack notification on publish, Notion mirror |
+| Magic-byte MIME sniffing | Pending — upload validation currently trusts browser-provided content-type |
+| Read-time progress bar | Pending — fixed-top scroll-progress strip on long posts |
+| SWR adoption | Only justified when a heavy client dashboard appears (e.g., realtime drafts list) |
+
+Collaborative editing with Y.js / WebSocket-based presence is **intentionally out of scope** — the current heartbeat-based edit lock is the right tradeoff for a 5-author team.
+
+---
+
+## 20. Docs Index
+
+Living docs for ops, audit history, and design rationale in `docs/`:
 
 | Doc | Topic |
 |---|---|
-| `codebase-stabilization-audit.md` | Overall stability snapshot |
+| `analytics-system-v2.md` | Event tracking, sessions, per-post view analytics |
+| `analytics-upgrade-audit.md` | Migration from simple post_views to analytics_events v2 |
+| `codebase-stabilization-audit.md` | Overall codebase stability snapshot |
+| `collaboration-feature.md` | Edit locks, editor/reviewer roles, review comments, contributor credit |
+| `collaboration-implementation-audit.md` | RLS + trigger audit for collaboration |
 | `editor-publish-scheduling-upgrade.md` | Three-button publish flow rationale |
-| `editor-toolbar-collaboration-upgrade.md` | Toolbar redesign |
-| `editor-toolbar-layout-fix.md` | Sticky-toolbar root cause |
-| `frontend-cache-audit.md` | ISR + `unstable_cache` strategy |
-| `google-docs-paste-support.md` | Paste sanitizer rationale |
-| `keep-alive.md` | Supabase keep-alive cron |
-| `light-mode-guidelines.md` | Light-theme color choices |
-| `mobile-responsive-guidelines.md` | Mobile breakpoint rules |
+| `editor-toolbar-collaboration-upgrade.md` | Toolbar redesign for collaboration + lock status |
+| `editor-toolbar-layout-fix.md` | Sticky-toolbar `overflow: hidden` root cause |
+| `frontend-cache-audit.md` | ISR + `unstable_cache` strategy + per-surface TTLs |
+| `google-docs-paste-support.md` | HTML sanitization + vendor-class stripping on paste |
+| `keep-alive.md` | Supabase free-tier warm-up cron rationale |
+| `light-mode-guidelines.md` | Light-theme color rationale + contrast checks |
+| `mobile-responsive-guidelines.md` | Mobile breakpoints + `min-w-0` flex rules |
 | `mobile-spacing-fixes.md` | Catalog of mobile overflow fixes |
-| `newsletter-delivery-debug.md` | Diagnostic runbook |
-| `resend-newsletter-delivery.md` | Resend integration design |
+| `newsletter-delivery-debug.md` | Diagnostic runbook (sandbox detection, Resend logs, unsubscribe) |
+| `post-contributor-display-debug.md` | Co-author byline rendering — root cause + data-query fix |
+| `resend-newsletter-delivery.md` | Resend integration design + RFC 8058 headers |
 | `save-publish-performance-audit.md` | Publish hot-path timings |
-| `social-preview-thumbnail-fix.md` | OG proxy design |
-| `social-sharing-preview.md` | Share button design |
-| `subscribe-feature.md` | Subscribe section design |
-| `theme-and-responsive-audit.md` | Theme + responsive audit |
-| `theme-light-default.md` | Light-as-default rationale |
-| `theme-system.md` | Pre-hydration theme system |
+| `social-preview-thumbnail-fix.md` | OG proxy design + crawler cache invalidation |
+| `social-sharing-preview.md` | Share button (Web Share API + clipboard) |
+| `subscribe-feature.md` | Subscribe CTA design + placement |
+| `theme-and-responsive-audit.md` | Theme system + responsive audit |
+| `theme-light-default.md` | Light-as-default rationale + first-visitor UX |
+| `theme-system.md` | Pre-hydration theme script, `data-theme`, CSS variables |
 
 ---
 
-_Last updated: 2026-05-17. Maintained alongside the codebase — when behavior changes, this README and the docs above change with it._
+_Last updated: 2026-06-10. Maintained alongside the codebase — when behavior changes, update this README and the relevant doc above._
