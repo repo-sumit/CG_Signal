@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Plus } from "lucide-react";
-import { requireAuthor } from "@/lib/auth/guards";
+import { requireWriter } from "@/lib/auth/guards";
 import { listOwnPosts, listSharedPosts } from "@/lib/db/posts";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -10,20 +10,20 @@ import { PostRowActions } from "@/components/blog/PostRowActions";
 import { formatPostDate, formatScheduledLabel } from "@/lib/utils/dates";
 import { isManager } from "@/lib/auth/roles";
 import { COLLAB_ROLE_LABEL } from "@/lib/auth/collaboration";
+import { reviewBadge } from "@/lib/utils/reviewStatus";
 
 export const metadata: Metadata = { title: "My posts" };
 export const dynamic = "force-dynamic";
 
-const STATUS_VARIANT: Record<string, "default" | "secondary" | "muted" | "success" | "warning" | "destructive"> = {
-  published: "success",
-  scheduled: "default",
-  submitted: "warning",
-  draft: "muted",
-  archived: "destructive",
+const GROUP_LABEL: Record<string, string> = {
+  draft: "Drafts",
+  submitted: "Under Review",
+  scheduled: "Scheduled",
+  published: "Published",
 };
 
 export default async function MyPostsPage() {
-  const { userId, profile } = await requireAuthor();
+  const { userId, profile } = await requireWriter();
   const [posts, shared] = await Promise.all([listOwnPosts(userId), listSharedPosts(userId)]);
 
   const live = posts.filter((p) => p.status !== "archived");
@@ -66,13 +66,15 @@ export default async function MyPostsPage() {
             (grouped[status]?.length ?? 0) > 0 ? (
               <Panel key={status}>
                 <PanelHeader>
-                  <div className="font-hero text-base font-bold uppercase tracking-tighter text-portal-text capitalize">
-                    {status} ({grouped[status]!.length})
+                  <div className="font-hero text-base font-bold uppercase tracking-tighter text-portal-text">
+                    {GROUP_LABEL[status] ?? status} ({grouped[status]!.length})
                   </div>
                 </PanelHeader>
                 <PanelBody className="p-0">
                   <ul className="divide-y divide-portal-border-soft">
-                    {grouped[status]!.map((p) => (
+                    {grouped[status]!.map((p) => {
+                      const badge = reviewBadge(p.status, p.review_status);
+                      return (
                       <li key={p.id} className="flex items-center justify-between gap-3 px-6 py-4">
                         <div className="min-w-0 flex-1">
                           <Link
@@ -90,9 +92,19 @@ export default async function MyPostsPage() {
                               <> · {p.viewCount ?? 0} {p.viewCount === 1 ? "view" : "views"}</>
                             )}
                           </div>
+                          {p.review_status === "changes_requested" && p.review_note && (
+                            <p className="mt-2 rounded border border-portal-yellow/30 bg-portal-yellow/10 px-3 py-2 text-xs text-portal-text">
+                              <span className="font-bold">Changes requested:</span> {p.review_note}
+                            </p>
+                          )}
+                          {p.review_status === "rejected" && p.rejection_reason && (
+                            <p className="mt-2 rounded border border-portal-red/30 bg-portal-red/10 px-3 py-2 text-xs text-portal-text">
+                              <span className="font-bold">Review rejected:</span> {p.rejection_reason}
+                            </p>
+                          )}
                         </div>
                         <div className="flex items-center gap-2">
-                          <Badge variant={STATUS_VARIANT[p.status] ?? "secondary"}>{p.status}</Badge>
+                          <Badge variant={badge.variant}>{badge.label}</Badge>
                           <Button asChild size="sm" variant="outline">
                             <Link href={`/editor/${p.id}`}>Edit</Link>
                           </Button>
@@ -108,7 +120,8 @@ export default async function MyPostsPage() {
                           />
                         </div>
                       </li>
-                    ))}
+                      );
+                    })}
                   </ul>
                 </PanelBody>
               </Panel>
@@ -148,7 +161,10 @@ export default async function MyPostsPage() {
                           <Badge variant={isReviewer ? "secondary" : "default"}>
                             {COLLAB_ROLE_LABEL[p.collaboratorRole]}
                           </Badge>
-                          <Badge variant={STATUS_VARIANT[p.status] ?? "secondary"}>{p.status}</Badge>
+                          {(() => {
+                            const b = reviewBadge(p.status, p.review_status);
+                            return <Badge variant={b.variant}>{b.label}</Badge>;
+                          })()}
                           <Button asChild size="sm" variant="outline">
                             <Link href={`/editor/${p.id}`}>{isReviewer ? "Review" : "Edit"}</Link>
                           </Button>

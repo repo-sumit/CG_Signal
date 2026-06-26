@@ -30,7 +30,7 @@ export default async function UnauthorizedPage(
             </h1>
             <p className="text-sm leading-relaxed text-portal-text-muted">
               {isEditorBlock
-                ? "Sorry, you don't have editor access. You can still read posts and join the discussion."
+                ? `Sorry, you don't have posting access. Use a @${ALLOWED_DOMAIN} email account to create posts. You can still read posts and join the discussion.`
                 : reason === "domain"
                   ? `This area is limited to @${ALLOWED_DOMAIN} accounts. Sign in with your workspace email.`
                   : "Your account does not have access to this area."}

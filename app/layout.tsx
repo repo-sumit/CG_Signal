@@ -47,11 +47,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       suppressHydrationWarning
       className={`${spaceMono.variable} ${orbitron.variable}`}
     >
-      <body className="min-h-screen bg-portal-main text-portal-text antialiased">
-        {/* MUST be the first child of <body> — runs before any paint so the
-            visible theme matches the user's persisted choice / OS preference
-            without a flash of the wrong colours. */}
+      <head>
+        {/* Render-blocking preboot script — runs before <body> parses so the
+            visible theme matches the user's persisted choice without a flash of
+            the wrong colours. Lives in <head> (not <body>) because React 19
+            only executes inline scripts from the server-rendered HTML, and warns
+            when an inline <script> is reconciled inside the body tree. */}
         <ThemeScript />
+      </head>
+      <body className="min-h-screen bg-portal-main text-portal-text antialiased">
         <ThemeProvider>{children}</ThemeProvider>
         <Toaster
           // Sonner reads this once; the toast surface itself is themed by the

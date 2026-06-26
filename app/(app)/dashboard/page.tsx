@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { PenSquare, ListTodo, CheckCircle2 } from "lucide-react";
-import { requireAuthor } from "@/lib/auth/guards";
+import { requireWriter } from "@/lib/auth/guards";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { listTeam } from "@/lib/db/profiles";
 import { listPostsThisWeek, listOwnPosts } from "@/lib/db/posts";
 import { weekStartISO } from "@/lib/utils/dates";
-import { canAuthor, isManager } from "@/lib/auth/roles";
+import { canCreatePost, isManager } from "@/lib/auth/roles";
 import { effectiveRole } from "@/lib/auth/viewMode";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
   // Dashboard is editor-only — Gmail commenters get bounced to /unauthorized.
-  const { profile, userId } = await requireAuthor();
+  const { profile, userId } = await requireWriter();
   const supabase = await createSupabaseServerClient();
   const wk = weekStartISO();
   // When View Mode is active, every UI gate evaluates as a plain viewer.
@@ -37,7 +37,7 @@ export default async function DashboardPage() {
   const [team, postsThisWeek, ownPosts] = await Promise.all([
     listTeam(),
     listPostsThisWeek(wk),
-    canAuthor(role) ? listOwnPosts(userId) : Promise.resolve([]),
+    canCreatePost(role) ? listOwnPosts(userId) : Promise.resolve([]),
   ]);
 
   let submittedRows: SubmittedRow[] = [];
@@ -78,7 +78,7 @@ export default async function DashboardPage() {
           becomes part of the team archive.
         </p>
         <div className="flex flex-wrap items-center gap-3 pt-1">
-          {canAuthor(role) && (
+          {canCreatePost(role) && (
             <Button asChild>
               <Link href="/editor/new">
                 <PenSquare className="h-4 w-4" />
@@ -94,7 +94,7 @@ export default async function DashboardPage() {
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          {canAuthor(role) && (
+          {canCreatePost(role) && (
             <Panel>
               <PanelHeader>
                 <div className="font-hero text-base font-bold uppercase tracking-tighter text-portal-text">
@@ -176,7 +176,7 @@ export default async function DashboardPage() {
               {postsThisWeek.length === 0 ? (
                 <div className="rounded-md border border-dashed border-portal-border-soft p-10 text-center">
                   <p className="text-sm text-portal-text-muted">No signals broadcast yet.</p>
-                  {canAuthor(role) && (
+                  {canCreatePost(role) && (
                     <Button asChild className="mt-4">
                       <Link href="/editor/new">Be the first signal</Link>
                     </Button>

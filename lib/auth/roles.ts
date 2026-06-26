@@ -7,6 +7,7 @@ import type { AppRole } from "@/lib/db/types";
  */
 export const ROLE_LABEL: Record<AppRole, string> = {
   viewer: "Viewer",
+  writer: "Writer",
   author: "Author",
   manager: "Admin",
 };
@@ -26,6 +27,35 @@ export function isManager(role: AppRole | null | undefined) {
 
 /** Convenience alias — "admin" is the product term for manager. */
 export const isAdmin = isManager;
+
+/**
+ * Anyone who can open the editor and create/edit their own posts: general
+ * writers (any @convegenius.ai employee) plus the core team. Distinct from
+ * `canAuthor` — writers are NOT authors and must go through review.
+ */
+export function canCreatePost(role: AppRole | null | undefined) {
+  return role === "writer" || role === "author" || role === "manager";
+}
+
+/**
+ * Can publish/schedule a post directly without admin review. Writers never can
+ * — their posts always go through the review queue. (Core authors may still be
+ * gated by the optional `require_manager_review` runtime flag, enforced in the
+ * save action, not here.)
+ */
+export function canPublishDirectly(role: AppRole | null | undefined) {
+  return role === "author" || role === "manager";
+}
+
+/** Can review submitted posts (approve / reject / request changes). */
+export function canReview(role: AppRole | null | undefined) {
+  return role === "manager";
+}
+
+/** A general writer (not a core author/manager/external viewer). */
+export function isGeneralWriter(role: AppRole | null | undefined) {
+  return role === "writer";
+}
 
 export function isValidDomain(email: string, allowedDomain: string) {
   const e = email.trim().toLowerCase();

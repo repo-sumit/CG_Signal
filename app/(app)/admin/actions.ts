@@ -7,6 +7,12 @@ import { requireManager } from "@/lib/auth/guards";
 import { slugify } from "@/lib/utils/slugs";
 import type { ProfileRow } from "@/lib/db/types";
 import { PUBLIC_FEED_TAG } from "@/lib/db/public";
+import {
+  cleanupReviewArtifactsOnPublish,
+  syncPostContributors,
+} from "@/lib/db/publishSideEffects";
+import { sendPerPostNewsletter } from "@/lib/email/newsletter";
+import { notifyWriterOfReview } from "@/lib/email/reviewNotifications";
 
 type ActionResult = { ok: boolean; error?: string };
 
@@ -51,7 +57,7 @@ export async function setWeekday(input: z.infer<typeof WeekdayInput>): Promise<A
 
 const UpsertAuthorizedInput = z.object({
   email: z.string().email().max(254),
-  role: z.enum(["viewer", "author", "manager"]),
+  role: z.enum(["viewer", "writer", "author", "manager"]),
   weekday: z.number().int().min(1).max(5).nullable().optional(),
 });
 
@@ -118,10 +124,12 @@ export async function removeAuthorizedUser(email: string): Promise<ActionResult>
   }
 
   await supabase.from("authorized_users").delete().eq("email", clean);
-  // Demote profile to viewer.
+  // Demote profile to writer — any @convegenius.ai employee keeps general
+  // posting access (create + submit for review); they just lose author/admin
+  // privileges. (Next login re-derives the same writer role.)
   await supabase
     .from("profiles")
-    .update({ role: "viewer", weekly_post_day: null })
+    .update({ role: "writer", weekly_post_day: null })
     .eq("email", clean);
   revalidatePath("/admin/users");
   return { ok: true };
@@ -200,5 +208,193 @@ export async function setPostStatus(
   revalidatePath("/admin");
   revalidatePath("/");
   updateTag(PUBLIC_FEED_TAG);
+  return { ok: true };
+}
+
+// ============================================================
+// Admin review queue — approve / request changes / reject
+// ============================================================
+
+/** Slim post shape the review actions need: identity + author contact. */
+interface ReviewPostRow {
+  id: string;
+  slug: string;
+  title: string;
+  status: string;
+  published_at: string | null;
+  author: { email: string } | null;
+}
+
+async function loadReviewPost(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  postId: string,
+): Promise<ReviewPostRow | null> {
+  const { data } = await supabase
+    .from("posts")
+    .select("id, slug, title, status, published_at, author:profiles!posts_author_id_fkey ( email )")
+    .eq("id", postId)
+    .maybeSingle();
+  if (!data) return null;
+  const row = data as unknown as {
+    id: string;
+    slug: string;
+    title: string;
+    status: string;
+    published_at: string | null;
+    author: { email: string } | { email: string }[] | null;
+  };
+  const author = Array.isArray(row.author) ? (row.author[0] ?? null) : row.author;
+  return { ...row, author: author ? { email: author.email } : null };
+}
+
+function revalidateReviewSurfaces(): void {
+  revalidatePath("/admin");
+  revalidatePath("/admin/review");
+  revalidatePath("/me/posts");
+}
+
+/**
+ * Approve a submitted post and publish it in one step. Sets the review audit
+ * fields, flips status to published, then runs the same publish side effects
+ * as the editor's Post Now (contributor sync, artifact cleanup, newsletter),
+ * and emails the writer. Manager-only.
+ */
+export async function approveAndPublishPost(postId: string): Promise<ActionResult> {
+  const parsed = z.string().uuid().safeParse(postId);
+  if (!parsed.success) return { ok: false, error: "Invalid post id." };
+  const { userId } = await requireManager();
+  const supabase = await createSupabaseServerClient();
+
+  const post = await loadReviewPost(supabase, parsed.data);
+  if (!post) return { ok: false, error: "Post not found." };
+
+  const now = new Date().toISOString();
+  const update: Record<string, unknown> = {
+    review_status: "approved",
+    reviewed_at: now,
+    reviewed_by: userId,
+    review_note: null,
+    rejection_reason: null,
+    status: "published",
+  };
+  if (!post.published_at) update.published_at = now;
+
+  const { error } = await supabase.from("posts").update(update).eq("id", post.id);
+  if (error) return { ok: false, error: error.message };
+
+  // Publish side effects — same as the editor's Post Now path.
+  await cleanupReviewArtifactsOnPublish(post.id);
+  await syncPostContributors(post.id);
+  void sendPerPostNewsletter(post.id).catch((err) => {
+    console.error("[approveAndPublishPost] newsletter dispatch failed", err);
+  });
+  if (post.author?.email) {
+    void notifyWriterOfReview({
+      postId: post.id,
+      slug: post.slug,
+      title: post.title,
+      writerEmail: post.author.email,
+      decision: "approved",
+    }).catch((err) => console.error("[approveAndPublishPost] notify failed", err));
+  }
+
+  revalidatePath("/");
+  revalidatePath(`/posts/${post.slug}`);
+  updateTag(PUBLIC_FEED_TAG);
+  revalidateReviewSurfaces();
+  return { ok: true };
+}
+
+const ReviewFeedbackInput = z.object({
+  postId: z.string().uuid(),
+  note: z.string().trim().min(1, "Please add a note for the writer.").max(2000),
+});
+
+/**
+ * Send a submitted post back to the writer with a note, without rejecting it.
+ * Returns the post to draft so the writer regains edit control; the
+ * changes_requested badge + note persist until they resubmit. Manager-only.
+ */
+export async function requestPostChanges(
+  postId: string,
+  note: string,
+): Promise<ActionResult> {
+  const parsed = ReviewFeedbackInput.safeParse({ postId, note });
+  if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  const { userId } = await requireManager();
+  const supabase = await createSupabaseServerClient();
+
+  const post = await loadReviewPost(supabase, parsed.data.postId);
+  if (!post) return { ok: false, error: "Post not found." };
+
+  const { error } = await supabase
+    .from("posts")
+    .update({
+      review_status: "changes_requested",
+      status: "draft",
+      review_note: parsed.data.note,
+      rejection_reason: null,
+      reviewed_at: new Date().toISOString(),
+      reviewed_by: userId,
+    })
+    .eq("id", post.id);
+  if (error) return { ok: false, error: error.message };
+
+  if (post.author?.email) {
+    void notifyWriterOfReview({
+      postId: post.id,
+      slug: post.slug,
+      title: post.title,
+      writerEmail: post.author.email,
+      decision: "changes_requested",
+      note: parsed.data.note,
+    }).catch((err) => console.error("[requestPostChanges] notify failed", err));
+  }
+
+  revalidateReviewSurfaces();
+  return { ok: true };
+}
+
+/**
+ * Reject a submitted post with a required reason. Returns it to draft so the
+ * writer can revise + resubmit; the rejection reason persists until then.
+ * Manager-only.
+ */
+export async function rejectPost(postId: string, reason: string): Promise<ActionResult> {
+  const parsed = z
+    .object({ postId: z.string().uuid(), reason: z.string().trim().min(1, "A rejection reason is required.").max(2000) })
+    .safeParse({ postId, reason });
+  if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  const { userId } = await requireManager();
+  const supabase = await createSupabaseServerClient();
+
+  const post = await loadReviewPost(supabase, parsed.data.postId);
+  if (!post) return { ok: false, error: "Post not found." };
+
+  const { error } = await supabase
+    .from("posts")
+    .update({
+      review_status: "rejected",
+      status: "draft",
+      rejection_reason: parsed.data.reason,
+      review_note: null,
+      reviewed_at: new Date().toISOString(),
+      reviewed_by: userId,
+    })
+    .eq("id", post.id);
+  if (error) return { ok: false, error: error.message };
+
+  if (post.author?.email) {
+    void notifyWriterOfReview({
+      postId: post.id,
+      slug: post.slug,
+      title: post.title,
+      writerEmail: post.author.email,
+      decision: "rejected",
+      note: parsed.data.reason,
+    }).catch((err) => console.error("[rejectPost] notify failed", err));
+  }
+
+  revalidateReviewSurfaces();
   return { ok: true };
 }

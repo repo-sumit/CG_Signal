@@ -38,14 +38,35 @@ export async function requireSession(): Promise<SessionContext> {
 }
 
 /**
- * Require an author/admin actor (approved editor). Non-editors (including
- * external Gmail commenters) are sent to /unauthorized. While View Mode is
- * active, editors are sent to /dashboard so the viewer simulation is consistent.
+ * Require an author/admin actor (approved core editor). Non-core editors
+ * (including general writers and external Gmail commenters) are sent to
+ * /unauthorized. While View Mode is active, editors are sent to /dashboard so
+ * the viewer simulation is consistent.
+ *
+ * NOTE: most editor routes now use {@link requireWriter} so general writers can
+ * create + submit posts. Reserve `requireAuthor` for surfaces that are truly
+ * core-author-only.
  */
 export async function requireAuthor(): Promise<SessionContext> {
   const ctx = await requireSession();
   if (await isViewModeActive()) redirect("/dashboard");
   if (ctx.profile.role !== "author" && ctx.profile.role !== "manager") {
+    redirect("/unauthorized?reason=editor");
+  }
+  return ctx;
+}
+
+/**
+ * Require an actor who can author posts: a general writer (any @convegenius.ai
+ * employee) OR a core author/admin. External Gmail commenters are sent to
+ * /unauthorized. This is the guard for the editor + "my posts" surfaces; the
+ * publish/review gating is enforced per-action by role, not here.
+ */
+export async function requireWriter(): Promise<SessionContext> {
+  const ctx = await requireSession();
+  if (await isViewModeActive()) redirect("/dashboard");
+  const role = ctx.profile.role;
+  if (role !== "writer" && role !== "author" && role !== "manager") {
     redirect("/unauthorized?reason=editor");
   }
   return ctx;

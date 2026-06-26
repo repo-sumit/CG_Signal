@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LayoutDashboard, BookOpen, PenSquare, FileText, ShieldCheck, LogOut } from "lucide-react";
 import type { ProfileRow, AppRole } from "@/lib/db/types";
-import { canAuthor, isManager, roleLabel } from "@/lib/auth/roles";
+import { canCreatePost, isManager, roleLabel } from "@/lib/auth/roles";
 import { cn } from "@/lib/utils/cn";
 import { Avatar } from "@/components/ui/Avatar";
 import { BrandLockup } from "@/components/portal/BrandLockup";
@@ -20,8 +20,8 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: "/dashboard",  label: "Dashboard",   icon: LayoutDashboard, show: () => true },
   { href: "/",           label: "Signal Feed", icon: BookOpen,        show: () => true },
-  { href: "/me/posts",   label: "My Posts",    icon: FileText,        show: (r) => canAuthor(r) },
-  { href: "/editor/new", label: "Transmit",    icon: PenSquare,       show: (r) => canAuthor(r) },
+  { href: "/me/posts",   label: "My Posts",    icon: FileText,        show: (r) => canCreatePost(r) },
+  { href: "/editor/new", label: "Transmit",    icon: PenSquare,       show: (r) => canCreatePost(r) },
   { href: "/admin",      label: "Admin",       icon: ShieldCheck,     show: (r) => isManager(r) },
 ];
 

@@ -1,8 +1,20 @@
 // Minimal hand-written Database type — sufficient for our hand-rolled query helpers.
 // In a real project, regenerate with `supabase gen types typescript` and replace this file.
 
-export type AppRole = "viewer" | "author" | "manager";
+export type AppRole = "viewer" | "writer" | "author" | "manager";
 export type PostStatus = "draft" | "submitted" | "scheduled" | "published" | "archived";
+/**
+ * Review sub-state for the admin approval workflow. Orthogonal to `PostStatus`:
+ * `status` is the publishing lifecycle, `review_status` is where a post sits in
+ * the review queue. General-writer posts move not_submitted → under_review →
+ * approved (and live) | changes_requested | rejected.
+ */
+export type ReviewStatus =
+  | "not_submitted"
+  | "under_review"
+  | "changes_requested"
+  | "approved"
+  | "rejected";
 export type MediaType = "image" | "video" | "audio" | "document";
 export type MediaSourceType = "upload" | "external_url";
 
@@ -58,6 +70,12 @@ export interface PostRow {
   updated_at: string;
   archived_at: string | null;
   newsletter_sent_at: string | null;
+  review_status: ReviewStatus;
+  submitted_for_review_at: string | null;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  review_note: string | null;
+  rejection_reason: string | null;
 }
 
 export interface MediaAssetRow {
@@ -169,6 +187,7 @@ export type Database = {
       is_manager: { Args: Record<string, never>; Returns: boolean };
       current_user_role: { Args: Record<string, never>; Returns: AppRole };
       is_author_or_manager: { Args: Record<string, never>; Returns: boolean };
+      is_writer_or_above: { Args: Record<string, never>; Returns: boolean };
       is_authorized_author: { Args: Record<string, never>; Returns: boolean };
       is_post_owner: { Args: { p_post_id: string }; Returns: boolean };
       is_post_collaborator: { Args: { p_post_id: string }; Returns: boolean };

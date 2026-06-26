@@ -26,7 +26,7 @@ import { PostContributorsRow } from "@/components/posts/PostContributorsRow";
 import { SubscribeSection } from "@/components/landing/SubscribeSection";
 import { SubscribeMiniCta } from "@/components/landing/SubscribeMiniCta";
 import { formatPostDate } from "@/lib/utils/dates";
-import { roleLabel } from "@/lib/auth/roles";
+import { roleLabel, canCreatePost } from "@/lib/auth/roles";
 import { sanitizeHtml } from "@/lib/editor/sanitize";
 import { getSessionContext } from "@/lib/auth/guards";
 
@@ -126,8 +126,7 @@ export default async function PublicPostPage(props: { params: Promise<{ slug: st
   // Contributors (authors + managers) don't need to be pitched the newsletter
   // — they are the people producing it. Hide the in-post subscribe surfaces
   // for them so the editorial flow stays clean.
-  const isContributor =
-    session?.profile.role === "author" || session?.profile.role === "manager";
+  const isContributor = canCreatePost(session?.profile.role);
   // Split long articles at a paragraph boundary so the mini CTA sits at a
   // natural editorial break rather than mid-sentence. Returns null when the
   // article is too short to warrant a mid-article nudge.

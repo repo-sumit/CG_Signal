@@ -3,14 +3,15 @@
 import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
-import { requireSession, requireAuthor } from "@/lib/auth/guards";
+import { requireSession, requireWriter } from "@/lib/auth/guards";
 import {
   getCollaboratorRole,
   getActiveLock,
   resolvePostAccess,
 } from "@/lib/db/collaboration";
 import { deriveAccess } from "@/lib/auth/collaboration";
-import type { PostStatus } from "@/lib/db/types";
+import { canCreatePost } from "@/lib/auth/roles";
+import type { PostStatus, ReviewStatus } from "@/lib/db/types";
 import { slugify, withSuffix } from "@/lib/utils/slugs";
 import { weekStartISO } from "@/lib/utils/dates";
 import { readTimeFromHtml } from "@/lib/utils/read-time";
@@ -19,6 +20,11 @@ import { sanitizeHtml } from "@/lib/editor/sanitize";
 import { publicEnv } from "@/lib/env";
 import { WEEKLY_TEMPLATE } from "@/lib/editor/template";
 import { sendPerPostNewsletter } from "@/lib/email/newsletter";
+import { notifyAdminsOfSubmission } from "@/lib/email/reviewNotifications";
+import {
+  cleanupReviewArtifactsOnPublish,
+  syncPostContributors,
+} from "@/lib/db/publishSideEffects";
 import { PUBLIC_FEED_TAG } from "@/lib/db/public";
 
 const SavePostSchema = z.object({
@@ -40,6 +46,16 @@ const SavePostSchema = z.object({
 });
 
 export type SavePostInput = z.infer<typeof SavePostSchema>;
+
+/** Slim shape of the existing post row fetched before an update. */
+interface ExistingPostRow {
+  id: string;
+  slug: string;
+  author_id: string;
+  status: string;
+  title: string;
+  review_status: ReviewStatus;
+}
 
 export interface SavePostResult {
   ok: boolean;
@@ -86,74 +102,6 @@ function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
-/**
- * Publish-time cleanup. Review comments are draft-only feedback, so they must
- * never survive into a published post — and the edit lock is meaningless once
- * the post is live. Both are wiped with the service client (the caller has
- * already been verified as owner/manager). Idempotent: safe to re-run.
- */
-async function cleanupReviewArtifactsOnPublish(postId: string): Promise<void> {
-  const service = createSupabaseServiceClient();
-  await Promise.all([
-    service.from("post_review_comments").delete().eq("post_id", postId),
-    service.from("post_edit_locks").delete().eq("post_id", postId),
-  ]);
-}
-
-/**
- * Recomputes the canonical public-credit store for a post: the owner (always,
- * role 'owner') plus every current editor collaborator (role 'editor').
- * Reviewers are excluded. Stale rows (users no longer owner/editor) are pruned
- * so removing a collaborator also removes their credit. Idempotent.
- *
- * Called on publish AND on every collaborator change so the store stays fresh
- * even for posts whose collaborators change after they were first published.
- * (Drafts get rows too, but drafts are never public, so nothing leaks.)
- */
-async function syncPostContributors(postId: string): Promise<void> {
-  const service = createSupabaseServiceClient();
-  const { data: postRow } = await service
-    .from("posts")
-    .select("author_id")
-    .eq("id", postId)
-    .maybeSingle();
-  const ownerId = (postRow as { author_id?: string } | null)?.author_id;
-  if (!ownerId) return;
-
-  const { data: editorRows } = await service
-    .from("post_collaborators")
-    .select("user_id")
-    .eq("post_id", postId)
-    .eq("role", "editor");
-  const editorIds = ((editorRows ?? []) as { user_id: string }[])
-    .map((r) => r.user_id)
-    .filter((id) => id !== ownerId);
-
-  const rows: Array<{ post_id: string; user_id: string; role: string; display_order: number }> = [
-    { post_id: postId, user_id: ownerId, role: "owner", display_order: 0 },
-    ...editorIds.map((uid, i) => ({
-      post_id: postId,
-      user_id: uid,
-      role: "editor",
-      display_order: 10 + i,
-    })),
-  ];
-  await service.from("post_contributors").upsert(rows, { onConflict: "post_id,user_id" });
-
-  // Prune rows for users who are no longer the owner or an editor.
-  const keep = new Set<string>([ownerId, ...editorIds]);
-  const { data: existing } = await service
-    .from("post_contributors")
-    .select("user_id")
-    .eq("post_id", postId);
-  const stale = ((existing ?? []) as { user_id: string }[])
-    .map((r) => r.user_id)
-    .filter((uid) => !keep.has(uid));
-  if (stale.length > 0) {
-    await service.from("post_contributors").delete().eq("post_id", postId).in("user_id", stale);
-  }
-}
-
 export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   const totalStart = performance.now();
   const parsed = SavePostSchema.safeParse(input);
@@ -188,13 +136,13 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     ? Promise.resolve(
         supabase
           .from("posts")
-          .select("id, slug, author_id, status, title")
+          .select("id, slug, author_id, status, title, review_status")
           .eq("id", data.id)
           .maybeSingle(),
       ).then((res) => ({
-        data: res.data as { id: string; slug: string; author_id: string; status: string; title: string } | null,
+        data: res.data as ExistingPostRow | null,
       }))
-    : Promise.resolve({ data: null as { id: string; slug: string; author_id: string; status: string; title: string } | null });
+    : Promise.resolve({ data: null as ExistingPostRow | null });
 
   const tagsPromise = data.id && data.tag_ids
     ? Promise.resolve(
@@ -220,9 +168,10 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   ]);
   timed("auth+fetch", readStart);
 
-  if (profile.role !== "author" && profile.role !== "manager") {
+  if (!canCreatePost(profile.role)) {
     return { ok: false, error: "You don't have permission to author posts." };
   }
+  const isGeneralWriter = profile.role === "writer";
 
   // Resolve the caller's relationship to an EXISTING post and enforce the edit
   // lock. A brand-new post (no id) is authored by the caller, so this is a
@@ -263,6 +212,15 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     }
   }
 
+  // General writers can never edit a post that's already live — once an admin
+  // publishes it, it's out of the writer's hands (RLS enforces this too).
+  if (isGeneralWriter && existing && existing.status === "published") {
+    return {
+      ok: false,
+      error: "This signal is live and can no longer be edited.",
+    };
+  }
+
   // Determine desired status. The new publish flow has three explicit verbs —
   // Save Draft, Schedule Post, Post Now — which set draft / scheduled / published
   // respectively. The optional manager-review gate still demotes a Post Now to
@@ -271,10 +229,42 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   if (publicEnv.requireManagerReview && profile.role === "author" && desiredStatus === "published") {
     desiredStatus = "submitted";
   }
+
+  // Review workflow for general writers. They have only two verbs — Save Draft
+  // and Submit for Review — and can never reach published/scheduled. We track
+  // the review sub-state separately from the publishing status.
+  //   not_submitted  → draft, never sent
+  //   under_review   → submitted, sitting in the admin queue
+  //   changes_requested / rejected → back in the writer's hands (draft) with
+  //                    feedback; preserved across plain draft-saves until resubmit
+  let reviewStatusUpdate: ReviewStatus | null = null;
+  let submittedForReviewAt: string | null | undefined; // undefined = leave column untouched
+  let justSubmittedForReview = false;
+  if (isGeneralWriter) {
+    const currentReview: ReviewStatus = existing?.review_status ?? "not_submitted";
+    if (currentReview === "under_review") {
+      // Edits while under review don't pull the post out of the queue — the
+      // admin always sees the latest version (product decision).
+      desiredStatus = "submitted";
+      reviewStatusUpdate = "under_review";
+    } else if (data.status === "submitted") {
+      // Explicit Submit for Review (or resubmit after changes/rejection).
+      desiredStatus = "submitted";
+      reviewStatusUpdate = "under_review";
+      submittedForReviewAt = new Date().toISOString();
+      justSubmittedForReview = true;
+    } else {
+      // Save Draft — keep any prior feedback state so the banner persists.
+      desiredStatus = "draft";
+      reviewStatusUpdate = currentReview === "not_submitted" ? "not_submitted" : currentReview;
+    }
+  }
+
   // Editor collaborators can never change the publish status — their save only
   // touches content. Freeze the status to whatever the post already has.
   if (isCollaboratorEdit && frozenStatus) {
     desiredStatus = frozenStatus;
+    reviewStatusUpdate = null;
   }
 
   // Title is required for anything beyond a draft. Drafts may save empty so the
@@ -371,6 +361,17 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
         update.published_at = null;
       }
       if (desiredStatus === "archived") update.archived_at = new Date().toISOString();
+      // Review metadata. Writers carry an explicit review_status; for everyone,
+      // a transition to published is implicitly review-approved so the badge
+      // logic is uniform (published ⇒ approved).
+      if (reviewStatusUpdate) update.review_status = reviewStatusUpdate;
+      if (submittedForReviewAt !== undefined) update.submitted_for_review_at = submittedForReviewAt;
+      if (justSubmittedForReview) {
+        // Clear stale feedback from a prior review round on resubmit.
+        update.review_note = null;
+        update.rejection_reason = null;
+      }
+      if (desiredStatus === "published") update.review_status = "approved";
     }
 
     const updateStart = performance.now();
@@ -420,6 +421,9 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
       cover_media_id: coverMediaId ?? null,
       read_time_minutes: readTime,
       published_at: desiredStatus === "published" ? new Date().toISOString() : null,
+      review_status:
+        desiredStatus === "published" ? "approved" : (reviewStatusUpdate ?? "not_submitted"),
+      submitted_for_review_at: submittedForReviewAt ?? null,
     };
     const { data: row, error } = await supabase
       .from("posts")
@@ -453,6 +457,21 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     void sendPerPostNewsletter(postId).catch((err) => {
       console.error("[savePost] newsletter dispatch failed", err);
     });
+  }
+
+  // A general writer just submitted (or resubmitted) for review — notify the
+  // admins so they can pick it up from the review queue. Fire-and-forget: a
+  // missed email must never fail the save.
+  if (justSubmittedForReview && postId) {
+    void notifyAdminsOfSubmission({
+      postId,
+      title: trimmedTitle || "Untitled draft",
+      authorName: profile.full_name || profile.email,
+    }).catch((err) => {
+      console.error("[savePost] review-submission notify failed", err);
+    });
+    revalidatePath("/admin");
+    revalidatePath("/admin/review");
   }
 
   // Conditional revalidation — drafts aren't public, so revalidating `/` or
@@ -687,7 +706,7 @@ export async function inviteCollaborator(input: {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   }
   const { postId, userId: inviteeId, role } = parsed.data;
-  const { userId, profile } = await requireAuthor();
+  const { userId, profile } = await requireWriter();
   const supabase = await createSupabaseServerClient();
 
   const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
@@ -740,7 +759,7 @@ export async function removeCollaborator(input: {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   }
   const { postId, userId: targetId } = parsed.data;
-  const { userId, profile } = await requireAuthor();
+  const { userId, profile } = await requireWriter();
   const supabase = await createSupabaseServerClient();
 
   const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
@@ -776,7 +795,7 @@ export async function updateCollaboratorRole(input: {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   }
   const { postId, userId: targetId, role } = parsed.data;
-  const { userId, profile } = await requireAuthor();
+  const { userId, profile } = await requireWriter();
   const supabase = await createSupabaseServerClient();
 
   const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
@@ -818,7 +837,7 @@ export async function addReviewComment(input: {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   }
   const { postId, body } = parsed.data;
-  const { userId, profile } = await requireAuthor();
+  const { userId, profile } = await requireWriter();
   const supabase = await createSupabaseServerClient();
 
   const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
@@ -856,7 +875,7 @@ export async function deleteReviewComment(input: {
 }): Promise<CollaboratorActionResult> {
   const parsed = CommentIdSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: "Invalid comment id." };
-  const { userId, profile } = await requireAuthor();
+  const { userId, profile } = await requireWriter();
   const supabase = await createSupabaseServerClient();
 
   const comment = await loadReviewComment(supabase, parsed.data.commentId);
@@ -882,7 +901,7 @@ export async function resolveReviewComment(input: {
 }): Promise<CollaboratorActionResult> {
   const parsed = CommentIdSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: "Invalid comment id." };
-  const { userId, profile } = await requireAuthor();
+  const { userId, profile } = await requireWriter();
   const supabase = await createSupabaseServerClient();
 
   const comment = await loadReviewComment(supabase, parsed.data.commentId);

@@ -1,6 +1,13 @@
 import "server-only";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import type { AppRole, PostCollaboratorRole, PostRow, ProfileRow, TagRow } from "@/lib/db/types";
+import type {
+  AppRole,
+  PostCollaboratorRole,
+  PostRow,
+  ProfileRow,
+  ReviewStatus,
+  TagRow,
+} from "@/lib/db/types";
 
 type PostAuthor = Pick<ProfileRow, "id" | "full_name" | "email" | "avatar_url" | "role">;
 
@@ -15,6 +22,7 @@ const POST_SELECT = `
   id, author_id, title, slug, excerpt, content_json, content_html, status,
   week_start_date, assigned_weekday, published_at, scheduled_for, cover_media_id,
   read_time_minutes, created_at, updated_at, archived_at,
+  review_status, submitted_for_review_at, reviewed_at, reviewed_by, review_note, rejection_reason,
   author:profiles!posts_author_id_fkey ( id, full_name, email, avatar_url, role ),
   tags:post_tags ( tag:tags ( id, name, slug ) )
 `;
@@ -231,6 +239,48 @@ export async function listEditablePostsForUser(userId: string): Promise<Editable
   return [...owned, ...sharedTagged].sort((a, b) =>
     (b.updated_at ?? "").localeCompare(a.updated_at ?? ""),
   );
+}
+
+export type ReviewQueueFilter = ReviewStatus | "all" | "published";
+
+/**
+ * Admin review queue. Manager-only (RLS `posts_manager_all` lets managers read
+ * every post). `all` shows everything that has entered the review pipeline
+ * (excludes never-submitted drafts + archived); a specific filter narrows to
+ * that review_status, and `published` narrows to live posts.
+ */
+export async function listReviewQueue(filter: ReviewQueueFilter = "all"): Promise<PostWithAuthor[]> {
+  const supabase = await createSupabaseServerClient();
+  let q = supabase.from("posts").select(POST_SELECT).neq("status", "archived");
+
+  if (filter === "published") {
+    q = q.eq("status", "published");
+  } else if (filter === "all") {
+    q = q.neq("review_status", "not_submitted");
+  } else {
+    q = q.eq("review_status", filter);
+  }
+
+  q = q
+    .order("submitted_for_review_at", { ascending: false, nullsFirst: false })
+    .order("updated_at", { ascending: false });
+
+  const { data, error } = await q;
+  if (error) {
+    console.error("[listReviewQueue]", error);
+    return [];
+  }
+  return (data ?? []).map((r) => normalizeRow(r as unknown as Record<string, unknown>));
+}
+
+/** Count of posts currently awaiting admin review (the actionable queue). */
+export async function countUnderReview(): Promise<number> {
+  const supabase = await createSupabaseServerClient();
+  const { count } = await supabase
+    .from("posts")
+    .select("id", { count: "exact", head: true })
+    .eq("review_status", "under_review");
+  return count ?? 0;
 }
 
 export async function listPostsThisWeek(weekStart: string): Promise<PostWithAuthor[]> {

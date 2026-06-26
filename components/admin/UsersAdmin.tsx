@@ -19,7 +19,7 @@ interface Props {
 export function UsersAdmin({ allow, profiles }: Props) {
   const [pending, startTransition] = useTransition();
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"viewer" | "author" | "manager">("author");
+  const [role, setRole] = useState<"viewer" | "writer" | "author" | "manager">("author");
   const [weekday, setWeekday] = useState<number | "">("");
 
   function add() {
@@ -65,6 +65,7 @@ export function UsersAdmin({ allow, profiles }: Props) {
           <span className="text-xs font-medium text-muted-foreground">Role</span>
           <Select value={role} onChange={(e) => setRole(e.target.value as typeof role)}>
             <option value="viewer">Viewer</option>
+            <option value="writer">Writer</option>
             <option value="author">Author</option>
             <option value="manager">Manager</option>
           </Select>

@@ -69,9 +69,11 @@ export async function GET(request: NextRequest) {
     }
 
     // External (Gmail/etc.) sessions are always viewers — they can comment +
-    // react but not access editor/admin. Internal-domain users get whatever
-    // role the allowlist says, defaulting to viewer.
-    let role: "manager" | "author" | "viewer" = "viewer";
+    // react but not access editor/admin. Internal-domain users default to
+    // `writer` (any ConveGenius employee can create posts + submit for review),
+    // and get a higher role if the allowlist grants one.
+    type Role = "manager" | "author" | "writer" | "viewer";
+    let role: Role = "viewer";
     let weekday: number | null = null;
     if (isInternalDomain) {
       const { data: allow } = await service
@@ -79,8 +81,21 @@ export async function GET(request: NextRequest) {
         .select("role, weekly_post_day")
         .eq("email", email)
         .maybeSingle();
-      role = (allow?.role as typeof role | undefined) ?? "viewer";
+      role = (allow?.role as Role | undefined) ?? "writer";
       weekday = (allow?.weekly_post_day as number | null | undefined) ?? null;
+
+      // Never downgrade an already-elevated user. If a profile is already
+      // author/manager but the allowlist no longer lists them (e.g. env vars
+      // changed), keep their elevated role rather than dropping to writer.
+      const { data: existingProfile } = await service
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle();
+      const existingRole = (existingProfile?.role as Role | undefined) ?? null;
+      if ((existingRole === "manager" || existingRole === "author") && role === "writer") {
+        role = existingRole;
+      }
     }
 
     const meta = (user.user_metadata ?? {}) as Record<string, unknown>;

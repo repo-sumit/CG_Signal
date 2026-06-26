@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
-import { requireAuthor } from "@/lib/auth/guards";
+import { requireWriter } from "@/lib/auth/guards";
 import { listTags } from "@/lib/db/tags";
 import { PostEditor } from "@/components/editor/PostEditorLoader";
 import { WEEKLY_TEMPLATE } from "@/lib/editor/template";
@@ -17,7 +17,7 @@ export default async function NewEditorPage(
   }
 ) {
   const searchParams = await props.searchParams;
-  const { profile, userId } = await requireAuthor();
+  const { profile, userId } = await requireWriter();
 
   // Avoid accidentally creating a second draft for the same week. If one exists,
   // route the author to it. Override with /editor/new?force=1.

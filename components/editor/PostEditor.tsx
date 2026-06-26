@@ -40,7 +40,7 @@ import { validateFile } from "@/lib/utils/file-validation";
 import { directUploadMedia } from "@/lib/media/direct-upload";
 import { insertMediaBlock, insertVideoEmbed } from "@/lib/editor/media-extensions";
 import { publicEnv } from "@/lib/env";
-import type { PostRow, PostStatus, TagRow, AppRole } from "@/lib/db/types";
+import type { PostRow, PostStatus, ReviewStatus, TagRow, AppRole } from "@/lib/db/types";
 import { cn } from "@/lib/utils/cn";
 
 type SaveState = "idle" | "saving" | "saved" | "unsaved" | "error";
@@ -80,6 +80,10 @@ export function PostEditor({ initialPost, tags, role, requireReview, collaborati
   const isReviewer = relationship === "reviewer";
   const isCollabEditor = relationship === "editor";
   const isOwnerOrManager = relationship === "owner" || relationship === "manager";
+  // General writers (any @convegenius.ai employee) author through the review
+  // queue: only Save Draft + Submit for Review, never direct publish/schedule.
+  const isGeneralWriter = role === "writer";
+  const reviewStatus: ReviewStatus = (initialPost?.review_status as ReviewStatus) ?? "not_submitted";
 
   const initialTitle = initialPost?.title === "Untitled draft" ? "" : (initialPost?.title ?? "");
 
@@ -591,6 +595,23 @@ export function PostEditor({ initialPost, tags, role, requireReview, collaborati
     }
   }, [handleSave, requireReview, role, router, title]);
 
+  // General-writer Submit for Review. Sets the post to "submitted"; the server
+  // flips review_status to under_review, stamps submitted_for_review_at, and
+  // notifies admins. Editing afterwards keeps it under review (no auto-revert).
+  const handleSubmitForReview = useCallback(async () => {
+    if (!title.trim()) {
+      setTitleTouched(true);
+      toast.error("Please add a title before submitting.");
+      return;
+    }
+    setBusyAction("now");
+    const res = await handleSave("submitted", { scheduledFor: null });
+    setBusyAction(null);
+    if (!res?.ok) return;
+    toast.success("Submitted for review. An admin will review your signal before it goes live.");
+    router.push("/me/posts");
+  }, [handleSave, title, router]);
+
   const handleConfirmSchedule = useCallback(
     async (iso: string) => {
       if (!title.trim()) {
@@ -859,10 +880,49 @@ export function PostEditor({ initialPost, tags, role, requireReview, collaborati
         </div>
       )}
 
+      {/* Review banner for general writers — explains where the post sits in
+          the admin review workflow. */}
+      {isGeneralWriter && (
+        <ReviewBanner isNew={isNew} reviewStatus={reviewStatus} note={(initialPost?.review_note as string | null) ?? null} reason={(initialPost?.rejection_reason as string | null) ?? null} />
+      )}
+
       {/* Publish action bar. Owner/manager get the full publish verbs; an
           editor collaborator gets a single content-only "Save changes"
           (the server preserves status); reviewers get no save controls. */}
-      {isOwnerOrManager && (
+      {isOwnerOrManager && isGeneralWriter && (
+        // General writer: draft + submit for review only — never publish/schedule.
+        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
+          <Button
+            variant="outline"
+            onClick={handleSaveDraft}
+            disabled={anyActionBusy || !!lockedByOther}
+            className="w-full sm:w-auto sm:flex-1 sm:max-w-[200px]"
+          >
+            {busyAction === "draft" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            Save Draft
+          </Button>
+          <Button
+            onClick={handleSubmitForReview}
+            disabled={anyActionBusy || titleEmpty || !!lockedByOther}
+            title={titleEmpty ? "Add a title first" : undefined}
+            className="w-full sm:w-auto sm:flex-1 sm:max-w-[260px]"
+          >
+            {busyAction === "now" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+            {reviewStatus === "changes_requested" || reviewStatus === "rejected"
+              ? "Resubmit for Review"
+              : "Submit for Review"}
+          </Button>
+        </div>
+      )}
+      {isOwnerOrManager && !isGeneralWriter && (
         <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
           <Button
             variant="outline"
@@ -1439,5 +1499,69 @@ function BubbleMenuButton({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * Review-workflow status banner shown to general writers in the editor. Mirrors
+ * the UI copy in the product spec for each review state.
+ */
+function ReviewBanner({
+  isNew,
+  reviewStatus,
+  note,
+  reason,
+}: {
+  isNew: boolean;
+  reviewStatus: ReviewStatus;
+  note: string | null;
+  reason: string | null;
+}) {
+  let tone: "info" | "warning" | "danger" | "success" = "info";
+  let title: string;
+  let body: string;
+
+  if (reviewStatus === "under_review") {
+    tone = "warning";
+    title = "Your post is under review";
+    body = "You can still make edits, but it will not go live until an admin approves it.";
+  } else if (reviewStatus === "changes_requested") {
+    tone = "warning";
+    title = "Changes requested";
+    body = note?.trim()
+      ? `${note.trim()} — please update your post and resubmit.`
+      : "Please update your post and resubmit for review.";
+  } else if (reviewStatus === "rejected") {
+    tone = "danger";
+    title = "Review rejected";
+    body = reason?.trim()
+      ? `Reason: ${reason.trim()} — you can revise and resubmit.`
+      : "You can revise your post and submit it for review again.";
+  } else if (reviewStatus === "approved") {
+    tone = "success";
+    title = "Review passed";
+    body = "An admin approved this signal.";
+  } else {
+    // not_submitted
+    title = isNew ? "Create your signal" : "Draft";
+    body = "Your post will be reviewed by an admin before publishing.";
+  }
+
+  const toneClass =
+    tone === "warning"
+      ? "border-portal-yellow/40 bg-portal-yellow/10"
+      : tone === "danger"
+        ? "border-portal-red/40 bg-portal-red/10"
+        : tone === "success"
+          ? "border-portal-green/40 bg-portal-green/10"
+          : "border-portal-border-muted bg-portal-panel-soft";
+
+  return (
+    <div className={cn("mb-3 rounded-md border px-4 py-3", toneClass)}>
+      <div className="font-ui text-[11px] font-bold uppercase tracking-label text-portal-text">
+        {title}
+      </div>
+      <p className="mt-1 text-sm text-portal-text-muted">{body}</p>
+    </div>
   );
 }

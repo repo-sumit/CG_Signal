@@ -3,6 +3,7 @@ import { Clock, ImageIcon, Video, Music } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
 import { formatPostDate } from "@/lib/utils/dates";
+import { reviewBadge } from "@/lib/utils/reviewStatus";
 import type { PostWithAuthor } from "@/lib/db/posts";
 
 function mediaIndicators(html: string) {
@@ -23,7 +24,11 @@ export function PostCard({ post }: { post: PostWithAuthor }) {
             {post.tags.slice(0, 2).map((t) => (
               <Badge key={t.id} variant="secondary">{t.name}</Badge>
             ))}
-            {post.status !== "published" && <Badge variant="warning">{post.status}</Badge>}
+            {post.status !== "published" &&
+              (() => {
+                const b = reviewBadge(post.status, post.review_status);
+                return <Badge variant={b.variant}>{b.label}</Badge>;
+              })()}
           </div>
           <span className="inline-flex items-center gap-1.5 text-portal-text-muted">
             {m.image && <ImageIcon className="h-3.5 w-3.5" aria-label="image" />}

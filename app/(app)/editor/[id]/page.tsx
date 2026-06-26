@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-import { requireAuthor } from "@/lib/auth/guards";
+import { requireWriter } from "@/lib/auth/guards";
 import { listTags } from "@/lib/db/tags";
 import { getPostById } from "@/lib/db/posts";
 import { getCollaboratorRole, loadEditorCollaboration } from "@/lib/db/collaboration";
@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 
 export default async function EditPostPage(props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const { profile, userId } = await requireAuthor();
+  const { profile, userId } = await requireWriter();
 
   // getPostById is RLS-scoped: collaborators can now read drafts they're
   // invited to, so a null result means "not found OR no access" → notFound.
