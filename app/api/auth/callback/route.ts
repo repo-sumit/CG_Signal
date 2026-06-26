@@ -1,10 +1,77 @@
 import { NextResponse, type NextRequest } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
-import { serverEnv } from "@/lib/env";
+import { serverEnv, publicEnv } from "@/lib/env";
 import { safeRedirectPath } from "@/lib/auth/safeRedirect";
+import { activatePendingInvites } from "@/lib/db/collaboration";
+import { sendEmail } from "@/lib/email/resend";
+import { welcomeTemplate } from "@/lib/email/templates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * Auto-subscribe a user to the newsletter on login and send the welcome email
+ * exactly once. Best-effort — callers must not let this block sign-in.
+ *
+ * - New email → insert an active subscription (source=login_auto_subscribe).
+ * - Existing + active → link the user_id; send welcome only if never sent.
+ * - Existing + unsubscribed → respect their choice; never silently resubscribe.
+ *
+ * The welcome send is claimed by stamping welcome_sent_at FIRST (conditional
+ * update) so concurrent logins can't double-send.
+ */
+async function autoSubscribeOnLogin(
+  service: SupabaseClient,
+  userId: string,
+  email: string,
+): Promise<void> {
+  type SubRow = { id: string; unsubscribed_at: string | null; welcome_sent_at: string | null };
+  const { data: existing } = await service
+    .from("subscribers")
+    .select("id, unsubscribed_at, welcome_sent_at")
+    .ilike("email", email)
+    .maybeSingle();
+  let row = existing as SubRow | null;
+
+  if (!row) {
+    const { data: inserted, error } = await service
+      .from("subscribers")
+      .insert({ email, user_id: userId, source: "login_auto_subscribe" })
+      .select("id, unsubscribed_at, welcome_sent_at")
+      .single();
+    if (error || !inserted) return;
+    row = inserted as SubRow;
+  } else {
+    // Link the signed-in user without disturbing their subscription state.
+    await service.from("subscribers").update({ user_id: userId }).eq("id", row.id).is("user_id", null);
+  }
+  if (!row || row.unsubscribed_at || row.welcome_sent_at) return;
+
+  // Claim the welcome send (idempotent across concurrent logins).
+  const { data: claimed } = await service
+    .from("subscribers")
+    .update({ welcome_sent_at: new Date().toISOString() })
+    .eq("id", row.id)
+    .is("welcome_sent_at", null)
+    .select("unsubscribe_token");
+  const token = (claimed?.[0] as { unsubscribe_token?: string } | undefined)?.unsubscribe_token;
+  if (!token) return;
+
+  const unsubscribeUrl = `${publicEnv.appUrl}/api/subscribe/unsubscribe?t=${token}`;
+  const tpl = welcomeTemplate({ appUrl: publicEnv.appUrl, unsubscribeUrl });
+  const res = await sendEmail({
+    to: email,
+    subject: tpl.subject,
+    html: tpl.html,
+    text: tpl.text,
+    headers: {
+      "List-Unsubscribe": `<${unsubscribeUrl}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    },
+  });
+  if (!res.ok) console.error("[auth/callback] welcome email failed", res.error);
+}
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
@@ -124,6 +191,17 @@ export async function GET(request: NextRequest) {
     const dest = new URL("/login", url.origin);
     dest.searchParams.set("error", "Profile bootstrap failed. Contact your admin.");
     return NextResponse.redirect(dest);
+  }
+
+  // Post-login side tasks — best-effort, never block sign-in:
+  //   1. Activate any pending collaborator invites addressed to this email.
+  //   2. Auto-subscribe to the newsletter (+ one-time welcome email).
+  try {
+    const service = createSupabaseServiceClient();
+    await activatePendingInvites(service, user.id, email);
+    await autoSubscribeOnLogin(service, user.id, email);
+  } catch (err) {
+    console.error("[auth/callback] post-login tasks failed", err);
   }
 
   // External (commenter) sessions should never land on a protected dashboard.

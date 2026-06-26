@@ -64,7 +64,7 @@ export default async function AnalyticsPage(props: { searchParams: Promise<Searc
   const selectedPostId = typeof searchParams.postId === "string" ? searchParams.postId : null;
 
   return (
-    <main className="container mx-auto space-y-6 px-4 py-8">
+    <main className="content-container space-y-6 py-8">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
         <p className="text-sm text-muted-foreground">

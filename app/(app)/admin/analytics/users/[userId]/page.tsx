@@ -92,7 +92,7 @@ export default async function UserAnalyticsPage(props: PageProps) {
   const history = await loadReadingHistory(userId, window);
 
   return (
-    <main className="container mx-auto space-y-6 px-4 py-8">
+    <main className="content-container space-y-6 py-8">
       <div>
         <Button asChild variant="ghost" size="sm" className="mb-4">
           <Link href={`/admin/analytics?tab=users&window=${windowId}`}>

@@ -13,6 +13,8 @@ const FILTERS: ReviewQueueFilter[] = [
   "approved",
   "rejected",
   "published",
+  "hidden",
+  "deleted",
 ];
 
 function resolveFilter(raw: string | string[] | undefined): ReviewQueueFilter {
@@ -46,6 +48,7 @@ export default async function ReviewQueuePage({
     updatedAt: p.updated_at,
     authorName: p.author?.full_name ?? p.author?.email ?? "Unknown",
     tags: p.tags.map((t) => t.name),
+    deletedAt: p.deleted_at,
   }));
 
   return <ReviewQueue items={items} activeFilter={filter} />;

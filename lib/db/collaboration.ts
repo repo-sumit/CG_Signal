@@ -8,6 +8,7 @@ import {
   type ApprovedTeammate,
   type CollaboratorView,
   type LockView,
+  type PendingInviteView,
   type PostAccess,
   type ReviewCommentView,
 } from "@/lib/auth/collaboration";
@@ -196,19 +197,20 @@ export async function getActiveLock(client: DbClient, postId: string): Promise<L
 }
 
 /**
- * Active, approved teammates eligible to be invited as collaborators — every
- * profile whose role is `author` or `manager`. The caller is responsible for
- * filtering out the owner + existing collaborators in the UI. Sorted by the
- * canonical team display order so the dropdown matches every other team list.
+ * Active users eligible to be invited as collaborators — every ConveGenius
+ * profile that can author content (`writer`, `author`, or `manager`). External
+ * commenters (`viewer`) are excluded. The caller filters out the owner +
+ * existing collaborators in the UI. Core team sort first (canonical display
+ * order), then everyone else alphabetically.
  */
-export async function listApprovedTeammates(client: DbClient): Promise<ApprovedTeammate[]> {
+export async function listInvitableUsers(client: DbClient): Promise<ApprovedTeammate[]> {
   const { data, error } = await client
     .from("profiles")
     .select("id, full_name, email, avatar_url, role")
-    .in("role", ["author", "manager"])
+    .in("role", ["writer", "author", "manager"])
     .eq("is_active", true);
   if (error) {
-    console.error("[listApprovedTeammates]", error);
+    console.error("[listInvitableUsers]", error);
     return [];
   }
   const rows = (data ?? []) as ProfileLite[];
@@ -228,12 +230,82 @@ export async function listApprovedTeammates(client: DbClient): Promise<ApprovedT
     });
 }
 
+/** Backwards-compatible alias — broadened to include general writers. */
+export const listApprovedTeammates = listInvitableUsers;
+
+/** Pending (not-yet-accepted) email invites for a post. */
+export async function listPendingInvites(
+  client: DbClient,
+  postId: string,
+): Promise<PendingInviteView[]> {
+  const { data, error } = await client
+    .from("post_collaborator_invites")
+    .select("id, email, role, created_at")
+    .eq("post_id", postId)
+    .is("accepted_at", null)
+    .order("created_at", { ascending: true });
+  if (error) {
+    console.error("[listPendingInvites]", error);
+    return [];
+  }
+  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  return rows
+    .map((r) => {
+      const role = r.role;
+      if (role !== "editor" && role !== "reviewer") return null;
+      return {
+        id: String(r.id ?? ""),
+        email: String(r.email ?? ""),
+        role: role as PostCollaboratorRole,
+        createdAt: String(r.created_at ?? ""),
+      } satisfies PendingInviteView;
+    })
+    .filter((v): v is PendingInviteView => v !== null);
+}
+
+/**
+ * Activate any pending email invites for a freshly-authenticated user. Matches
+ * pending invites by email, creates the corresponding post_collaborators rows
+ * (ignoring duplicates), and stamps the invite as accepted. Runs with the
+ * service client from the auth callback (bypasses RLS). Best-effort: a failure
+ * here must never block login.
+ */
+export async function activatePendingInvites(
+  service: DbClient,
+  userId: string,
+  email: string,
+): Promise<void> {
+  const lower = email.trim().toLowerCase();
+  const { data, error } = await service
+    .from("post_collaborator_invites")
+    .select("id, post_id, role")
+    .ilike("email", lower)
+    .is("accepted_at", null);
+  if (error || !data || data.length === 0) return;
+
+  const invites = data as Array<{ id: string; post_id: string; role: PostCollaboratorRole }>;
+  for (const inv of invites) {
+    // Create the collaborator row (idempotent — unique(post_id,user_id)).
+    await service
+      .from("post_collaborators")
+      .upsert(
+        { post_id: inv.post_id, user_id: userId, role: inv.role },
+        { onConflict: "post_id,user_id", ignoreDuplicates: true },
+      );
+    await service
+      .from("post_collaborator_invites")
+      .update({ accepted_by: userId, accepted_at: new Date().toISOString() })
+      .eq("id", inv.id);
+  }
+}
+
 /** Convenience for the editor page: everything the collaboration UI needs. */
 export interface EditorCollaborationData {
   collaborators: CollaboratorView[];
   reviewComments: ReviewCommentView[];
   lock: LockView | null;
   approvedTeammates: ApprovedTeammate[];
+  pendingInvites: PendingInviteView[];
 }
 
 export async function loadEditorCollaboration(
@@ -241,11 +313,12 @@ export async function loadEditorCollaboration(
   opts: { canManageCollaborators: boolean },
 ): Promise<EditorCollaborationData> {
   const client = await createSupabaseServerClient();
-  const [collaborators, reviewComments, lock, approvedTeammates] = await Promise.all([
+  const [collaborators, reviewComments, lock, approvedTeammates, pendingInvites] = await Promise.all([
     listCollaborators(client, postId),
     listReviewComments(client, postId),
     getActiveLock(client, postId),
-    opts.canManageCollaborators ? listApprovedTeammates(client) : Promise.resolve([]),
+    opts.canManageCollaborators ? listInvitableUsers(client) : Promise.resolve([]),
+    opts.canManageCollaborators ? listPendingInvites(client, postId) : Promise.resolve([]),
   ]);
-  return { collaborators, reviewComments, lock, approvedTeammates };
+  return { collaborators, reviewComments, lock, approvedTeammates, pendingInvites };
 }

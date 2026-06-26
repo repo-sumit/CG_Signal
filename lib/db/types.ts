@@ -2,7 +2,7 @@
 // In a real project, regenerate with `supabase gen types typescript` and replace this file.
 
 export type AppRole = "viewer" | "writer" | "author" | "manager";
-export type PostStatus = "draft" | "submitted" | "scheduled" | "published" | "archived";
+export type PostStatus = "draft" | "submitted" | "scheduled" | "published" | "archived" | "hidden";
 /**
  * Review sub-state for the admin approval workflow. Orthogonal to `PostStatus`:
  * `status` is the publishing lifecycle, `review_status` is where a post sits in
@@ -76,6 +76,32 @@ export interface PostRow {
   reviewed_by: string | null;
   review_note: string | null;
   rejection_reason: string | null;
+  hidden_at: string | null;
+  hidden_by: string | null;
+  deleted_at: string | null;
+  deleted_by: string | null;
+}
+
+export interface SubscriberRow {
+  id: string;
+  email: string;
+  unsubscribe_token: string;
+  unsubscribed_at: string | null;
+  created_at: string;
+  source: string | null;
+  user_id: string | null;
+  welcome_sent_at: string | null;
+}
+
+export interface PostCollaboratorInviteRow {
+  id: string;
+  post_id: string;
+  email: string;
+  role: PostCollaboratorRole;
+  invited_by: string | null;
+  accepted_by: string | null;
+  accepted_at: string | null;
+  created_at: string;
 }
 
 export interface MediaAssetRow {

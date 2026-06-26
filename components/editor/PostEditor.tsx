@@ -1208,6 +1208,7 @@ export function PostEditor({ initialPost, tags, role, requireReview, collaborati
             currentUserId={currentUser.id}
             collaborators={collaboration.collaborators}
             approvedTeammates={collaboration.approvedTeammates}
+            pendingInvites={collaboration.pendingInvites}
           />
 
           <ReviewCommentsPanel

@@ -23,6 +23,7 @@ const POST_SELECT = `
   week_start_date, assigned_weekday, published_at, scheduled_for, cover_media_id,
   read_time_minutes, created_at, updated_at, archived_at,
   review_status, submitted_for_review_at, reviewed_at, reviewed_by, review_note, rejection_reason,
+  hidden_at, hidden_by, deleted_at, deleted_by,
   author:profiles!posts_author_id_fkey ( id, full_name, email, avatar_url, role ),
   tags:post_tags ( tag:tags ( id, name, slug ) )
 `;
@@ -241,24 +242,63 @@ export async function listEditablePostsForUser(userId: string): Promise<Editable
   );
 }
 
-export type ReviewQueueFilter = ReviewStatus | "all" | "published";
+export type ReviewQueueFilter =
+  | "all"
+  | "under_review"
+  | "changes_requested"
+  | "approved"
+  | "rejected"
+  | "published"
+  | "hidden"
+  | "deleted";
 
 /**
  * Admin review queue. Manager-only (RLS `posts_manager_all` lets managers read
- * every post). `all` shows everything that has entered the review pipeline
- * (excludes never-submitted drafts + archived); a specific filter narrows to
- * that review_status, and `published` narrows to live posts.
+ * every post). The tabs are orthogonal lenses on the publishing + review state:
+ *   all               — active pipeline + live posts (not hidden/deleted)
+ *   under_review       — awaiting a decision
+ *   changes_requested  — sent back with a note
+ *   approved           — passed review but not yet live
+ *   rejected           — declined
+ *   published          — currently live
+ *   hidden             — admin-hidden (removed from the public feed)
+ *   deleted            — admin soft-deleted
  */
 export async function listReviewQueue(filter: ReviewQueueFilter = "all"): Promise<PostWithAuthor[]> {
   const supabase = await createSupabaseServerClient();
-  let q = supabase.from("posts").select(POST_SELECT).neq("status", "archived");
+  let q = supabase.from("posts").select(POST_SELECT);
 
-  if (filter === "published") {
-    q = q.eq("status", "published");
-  } else if (filter === "all") {
-    q = q.neq("review_status", "not_submitted");
-  } else {
-    q = q.eq("review_status", filter);
+  switch (filter) {
+    case "published":
+      q = q.eq("status", "published");
+      break;
+    case "hidden":
+      q = q.eq("status", "hidden");
+      break;
+    case "deleted":
+      q = q.not("deleted_at", "is", null);
+      break;
+    case "under_review":
+    case "changes_requested":
+    case "rejected":
+      q = q.eq("review_status", filter).is("deleted_at", null);
+      break;
+    case "approved":
+      // Passed review but not yet published/hidden/deleted.
+      q = q
+        .eq("review_status", "approved")
+        .not("status", "in", "(published,hidden,archived)")
+        .is("deleted_at", null);
+      break;
+    case "all":
+    default:
+      // Everything that entered the pipeline + live posts, minus hidden,
+      // author-trashed (archived), and admin-deleted.
+      q = q
+        .neq("review_status", "not_submitted")
+        .not("status", "in", "(archived,hidden)")
+        .is("deleted_at", null);
+      break;
   }
 
   q = q

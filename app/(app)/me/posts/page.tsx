@@ -20,22 +20,34 @@ const GROUP_LABEL: Record<string, string> = {
   submitted: "Under Review",
   scheduled: "Scheduled",
   published: "Published",
+  hidden: "Hidden by an admin",
 };
+
+const GROUP_ORDER = ["draft", "submitted", "scheduled", "published", "hidden"] as const;
 
 export default async function MyPostsPage() {
   const { userId, profile } = await requireWriter();
   const [posts, shared] = await Promise.all([listOwnPosts(userId), listSharedPosts(userId)]);
 
-  const live = posts.filter((p) => p.status !== "archived");
-  const trashed = posts.filter((p) => p.status === "archived");
+  const live = posts.filter((p) => p.status !== "archived" && !p.deleted_at);
+  // Author trash is the author's OWN soft-deletes only. Admin-deleted posts
+  // (deleted_at stamped) are moderation — they don't belong in the author's
+  // trash and must not show a Restore button here.
+  const trashed = posts.filter((p) => p.status === "archived" && !p.deleted_at);
 
-  const grouped: Record<string, typeof live> = { draft: [], submitted: [], scheduled: [], published: [] };
+  const grouped: Record<string, typeof live> = {
+    draft: [],
+    submitted: [],
+    scheduled: [],
+    published: [],
+    hidden: [],
+  };
   for (const p of live) {
     if (grouped[p.status]) grouped[p.status]!.push(p);
   }
 
   return (
-    <div className="container mx-auto space-y-6 px-4 py-10">
+    <div className="content-container space-y-6 py-10">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-2">
           <h1 className="font-hero text-4xl font-bold uppercase tracking-tighter text-portal-text sm:text-5xl">
@@ -62,7 +74,7 @@ export default async function MyPostsPage() {
         </Panel>
       ) : (
         <>
-          {(["draft", "submitted", "scheduled", "published"] as const).map((status) =>
+          {GROUP_ORDER.map((status) =>
             (grouped[status]?.length ?? 0) > 0 ? (
               <Panel key={status}>
                 <PanelHeader>

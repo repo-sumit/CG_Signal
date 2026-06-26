@@ -32,7 +32,7 @@ export default async function AdminHomePage() {
   ];
 
   return (
-    <div className="container mx-auto space-y-6 px-4 py-10">
+    <div className="content-container space-y-6 py-10">
       <header className="space-y-2">
         <h1 className="font-hero text-4xl font-bold uppercase tracking-tighter text-portal-text sm:text-5xl">
           Admin

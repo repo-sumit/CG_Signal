@@ -16,7 +16,7 @@ export default async function UsersPage() {
     supabase.from("profiles").select("*").order("created_at", { ascending: false }),
   ]);
   return (
-    <main className="container mx-auto px-4 py-8">
+    <main className="content-container py-8">
       <h1 className="mb-1 text-2xl font-semibold tracking-tight">Users & allowlist</h1>
       <p className="mb-6 text-sm text-muted-foreground">
         Access is controlled by explicit email allowlist. Domain alone does not grant author/manager rights.

@@ -398,3 +398,93 @@ export async function rejectPost(postId: string, reason: string): Promise<Action
   revalidateReviewSurfaces();
   return { ok: true };
 }
+
+// ============================================================
+// Hide / restore / delete a published post (manager-only)
+// ============================================================
+
+/**
+ * Hide a published post: remove it from the public feed without deleting it.
+ * Public queries pin status='published', so flipping to 'hidden' instantly
+ * makes it unavailable (the post detail route 404s) while keeping it in the
+ * admin review queue under the "Hidden" tab.
+ */
+export async function hidePost(postId: string): Promise<ActionResult> {
+  const parsed = z.string().uuid().safeParse(postId);
+  if (!parsed.success) return { ok: false, error: "Invalid post id." };
+  const { userId } = await requireManager();
+  const supabase = await createSupabaseServerClient();
+
+  const post = await loadReviewPost(supabase, parsed.data);
+  if (!post) return { ok: false, error: "Post not found." };
+
+  const { error } = await supabase
+    .from("posts")
+    .update({ status: "hidden", hidden_at: new Date().toISOString(), hidden_by: userId })
+    .eq("id", post.id);
+  if (error) return { ok: false, error: error.message };
+
+  revalidatePath("/");
+  revalidatePath(`/posts/${post.slug}`);
+  updateTag(PUBLIC_FEED_TAG);
+  revalidateReviewSurfaces();
+  return { ok: true };
+}
+
+/** Restore a hidden post back to published (re-list it on the public feed). */
+export async function restoreHiddenPost(postId: string): Promise<ActionResult> {
+  const parsed = z.string().uuid().safeParse(postId);
+  if (!parsed.success) return { ok: false, error: "Invalid post id." };
+  await requireManager();
+  const supabase = await createSupabaseServerClient();
+
+  const post = await loadReviewPost(supabase, parsed.data);
+  if (!post) return { ok: false, error: "Post not found." };
+  if (post.status !== "hidden") return { ok: false, error: "Only hidden posts can be restored." };
+
+  const { error } = await supabase
+    .from("posts")
+    .update({
+      status: "published",
+      hidden_at: null,
+      hidden_by: null,
+      published_at: post.published_at ?? new Date().toISOString(),
+    })
+    .eq("id", post.id);
+  if (error) return { ok: false, error: error.message };
+
+  revalidatePath("/");
+  revalidatePath(`/posts/${post.slug}`);
+  updateTag(PUBLIC_FEED_TAG);
+  revalidateReviewSurfaces();
+  return { ok: true };
+}
+
+/**
+ * Soft-delete a post (admin). Moves it out of the public feed and the active
+ * review queue into the "Deleted" tab. Reuses the existing 'archived' trash
+ * state and stamps deleted_at/deleted_by for the admin audit trail. Reversible
+ * until a permanent delete.
+ */
+export async function deletePostAdmin(postId: string): Promise<ActionResult> {
+  const parsed = z.string().uuid().safeParse(postId);
+  if (!parsed.success) return { ok: false, error: "Invalid post id." };
+  const { userId } = await requireManager();
+  const supabase = await createSupabaseServerClient();
+
+  const post = await loadReviewPost(supabase, parsed.data);
+  if (!post) return { ok: false, error: "Post not found." };
+
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("posts")
+    .update({ status: "archived", archived_at: now, deleted_at: now, deleted_by: userId })
+    .eq("id", post.id);
+  if (error) return { ok: false, error: error.message };
+
+  revalidatePath("/");
+  revalidatePath(`/posts/${post.slug}`);
+  updateTag(PUBLIC_FEED_TAG);
+  revalidateReviewSurfaces();
+  return { ok: true };
+}

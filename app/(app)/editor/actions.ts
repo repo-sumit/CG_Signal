@@ -20,7 +20,7 @@ import { sanitizeHtml } from "@/lib/editor/sanitize";
 import { publicEnv } from "@/lib/env";
 import { WEEKLY_TEMPLATE } from "@/lib/editor/template";
 import { sendPerPostNewsletter } from "@/lib/email/newsletter";
-import { notifyAdminsOfSubmission } from "@/lib/email/reviewNotifications";
+import { notifyAdminsOfSubmission, notifyCollaboratorInvite } from "@/lib/email/reviewNotifications";
 import {
   cleanupReviewArtifactsOnPublish,
   syncPostContributors,
@@ -37,7 +37,9 @@ const SavePostSchema = z.object({
   excerpt: z.string().max(500).optional().nullable(),
   content_json: z.unknown(),
   content_html: z.string().default(""),
-  status: z.enum(["draft", "submitted", "scheduled", "published", "archived"]).default("draft"),
+  status: z
+    .enum(["draft", "submitted", "scheduled", "published", "archived", "hidden"])
+    .default("draft"),
   // `scheduled_for` is now an explicit input from the Schedule Post modal.
   // The server only writes it when status === "scheduled".
   scheduled_for: z.string().datetime().nullable().optional(),
@@ -55,6 +57,7 @@ interface ExistingPostRow {
   status: string;
   title: string;
   review_status: ReviewStatus;
+  deleted_at: string | null;
 }
 
 export interface SavePostResult {
@@ -136,7 +139,7 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     ? Promise.resolve(
         supabase
           .from("posts")
-          .select("id, slug, author_id, status, title, review_status")
+          .select("id, slug, author_id, status, title, review_status, deleted_at")
           .eq("id", data.id)
           .maybeSingle(),
       ).then((res) => ({
@@ -212,12 +215,22 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
     }
   }
 
-  // General writers can never edit a post that's already live — once an admin
-  // publishes it, it's out of the writer's hands (RLS enforces this too).
-  if (isGeneralWriter && existing && existing.status === "published") {
+  // General writers can never edit a post that's live OR under admin
+  // moderation. Blocking only "published" left a hole: an admin-hidden post is
+  // still authored by the writer, and a Submit-for-Review save would flip it to
+  // 'submitted' (passing RLS), silently undoing the hide. Block published,
+  // hidden, and admin-deleted here so moderation can't be reversed by the author.
+  if (
+    isGeneralWriter &&
+    existing &&
+    (existing.status === "published" || existing.status === "hidden" || existing.deleted_at)
+  ) {
     return {
       ok: false,
-      error: "This signal is live and can no longer be edited.",
+      error:
+        existing.status === "published"
+          ? "This signal is live and can no longer be edited."
+          : "This signal is under admin moderation and can no longer be edited.",
     };
   }
 
@@ -226,6 +239,12 @@ export async function savePost(input: SavePostInput): Promise<SavePostResult> {
   // respectively. The optional manager-review gate still demotes a Post Now to
   // "submitted" for authors.
   let desiredStatus = data.status;
+  // `hidden` is an admin-only moderation state reached exclusively through the
+  // audited, manager-gated hidePost action — never honor it as a client-
+  // supplied save status (that would create hidden posts with no audit trail).
+  if (desiredStatus === "hidden") {
+    desiredStatus = (existing?.status as PostStatus) ?? "draft";
+  }
   if (publicEnv.requireManagerReview && profile.role === "author" && desiredStatus === "published") {
     desiredStatus = "submitted";
   }
@@ -616,19 +635,26 @@ export async function restorePost(id: string): Promise<SavePostResult> {
   const supabase = await createSupabaseServerClient();
   const { data: existing } = await supabase
     .from("posts")
-    .select("author_id, slug, status")
+    .select("author_id, slug, status, deleted_at")
     .eq("id", parsed.data)
     .maybeSingle();
   if (!existing) return { ok: false, error: "Post not found." };
-  if ((existing as { author_id: string }).author_id !== userId && profile.role !== "manager") {
+  const row = existing as { author_id: string; slug: string; status: string; deleted_at: string | null };
+  if (row.author_id !== userId && profile.role !== "manager") {
     return { ok: false, error: "You can only restore your own posts." };
   }
-  if ((existing as { status: string }).status !== "archived") {
+  if (row.status !== "archived") {
     return { ok: false, error: "Post is not archived." };
+  }
+  // An admin-deleted post (deleted_at stamped) is moderation, not the author's
+  // own trash — only a manager may bring it back, and we clear the delete stamps
+  // so it doesn't linger in the admin "Deleted" tab in a contradictory state.
+  if (row.deleted_at && profile.role !== "manager") {
+    return { ok: false, error: "This post was removed by an admin and can't be restored here." };
   }
   const { error } = await supabase
     .from("posts")
-    .update({ status: "draft", archived_at: null })
+    .update({ status: "draft", archived_at: null, deleted_at: null, deleted_by: null })
     .eq("id", parsed.data);
   if (error) return { ok: false, error: error.message };
   revalidatePath("/me/posts");
@@ -718,16 +744,16 @@ export async function inviteCollaborator(input: {
     return { ok: false, error: "The owner is already on this post." };
   }
 
-  // Only active, approved teammates (author/manager) can be invited — never a
-  // random viewer or external commenter.
+  // Any active ConveGenius user who can author content (writer/author/manager)
+  // can be invited — never a `viewer` (external commenter).
   const { data: inviteeRow } = await supabase
     .from("profiles")
     .select("id, role, is_active")
     .eq("id", inviteeId)
     .maybeSingle();
   const invitee = inviteeRow as { id: string; role: string; is_active: boolean } | null;
-  if (!invitee || !invitee.is_active || (invitee.role !== "author" && invitee.role !== "manager")) {
-    return { ok: false, error: "You can only invite approved teammates." };
+  if (!invitee || !invitee.is_active || !canCreatePost(invitee.role as Parameters<typeof canCreatePost>[0])) {
+    return { ok: false, error: "You can only invite ConveGenius teammates." };
   }
 
   const { error } = await supabase.from("post_collaborators").insert({
@@ -746,6 +772,108 @@ export async function inviteCollaborator(input: {
   await syncPostContributors(postId);
   revalidatePath(`/editor/${postId}`);
   revalidatePath("/me/posts");
+  return { ok: true };
+}
+
+const InviteByEmailSchema = z.object({
+  postId: z.string().uuid(),
+  email: z.string().email().max(254),
+  role: z.enum(["editor", "reviewer"]),
+});
+
+/**
+ * Owner / manager invites a collaborator by email. If a profile with that email
+ * already exists, they're added immediately; otherwise a pending invite is
+ * stored and activated on the invitee's next login (see activatePendingInvites).
+ * External (non-ConveGenius) emails are blocked.
+ */
+export async function inviteCollaboratorByEmail(input: {
+  postId: string;
+  email: string;
+  role: "editor" | "reviewer";
+}): Promise<CollaboratorActionResult> {
+  const parsed = InviteByEmailSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  }
+  const { postId, role } = parsed.data;
+  const email = parsed.data.email.trim().toLowerCase();
+  const { userId, profile } = await requireWriter();
+
+  // Block external collaborators — only ConveGenius emails may be invited.
+  const allowedDomain = (process.env.APP_ALLOWED_EMAIL_DOMAIN ?? "convegenius.ai").toLowerCase();
+  if (email.split("@")[1] !== allowedDomain) {
+    return { ok: false, error: `Only @${allowedDomain} emails can be invited as collaborators.` };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
+  if (!post) return { ok: false, error: "Post not found." };
+  if (!access.canManageCollaborators) {
+    return { ok: false, error: "Only the post owner or an admin can manage collaborators." };
+  }
+
+  // If the user already exists, add them directly (skip the pending flow).
+  const { data: existingRow } = await supabase
+    .from("profiles")
+    .select("id, role, is_active, email")
+    .ilike("email", email)
+    .maybeSingle();
+  const existing = existingRow as
+    | { id: string; role: string; is_active: boolean; email: string }
+    | null;
+  if (existing) {
+    if (existing.id === post.authorId) {
+      return { ok: false, error: "The owner is already on this post." };
+    }
+    return inviteCollaborator({ postId, userId: existing.id, role });
+  }
+
+  // No profile yet — store a pending invite, activated on their first login.
+  const { error } = await supabase
+    .from("post_collaborator_invites")
+    .upsert(
+      { post_id: postId, email, role, invited_by: userId },
+      { onConflict: "post_id,email" },
+    );
+  if (error) return { ok: false, error: error.message };
+
+  // Best-effort invite email (no-op if Resend unconfigured).
+  void notifyCollaboratorInvite({ email, postId }).catch((err) =>
+    console.error("[inviteCollaboratorByEmail] notify failed", err),
+  );
+
+  revalidatePath(`/editor/${postId}`);
+  return { ok: true };
+}
+
+/** Owner / manager cancels a pending email invite. */
+export async function cancelPendingInvite(input: {
+  postId: string;
+  inviteId: string;
+}): Promise<CollaboratorActionResult> {
+  const parsed = z
+    .object({ postId: z.string().uuid(), inviteId: z.string().uuid() })
+    .safeParse(input);
+  if (!parsed.success) return { ok: false, error: "Invalid input." };
+  const { postId, inviteId } = parsed.data;
+  const { userId, profile } = await requireWriter();
+  const supabase = await createSupabaseServerClient();
+
+  const { access, post } = await resolvePostAccess(supabase, postId, userId, profile.role);
+  if (!post) return { ok: false, error: "Post not found." };
+  if (!access.canManageCollaborators) {
+    return { ok: false, error: "Only the post owner or an admin can manage collaborators." };
+  }
+
+  const { error } = await supabase
+    .from("post_collaborator_invites")
+    .delete()
+    .eq("id", inviteId)
+    .eq("post_id", postId)
+    .is("accepted_at", null);
+  if (error) return { ok: false, error: error.message };
+  revalidatePath(`/editor/${postId}`);
   return { ok: true };
 }
 

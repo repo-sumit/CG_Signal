@@ -4,7 +4,18 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { CheckCircle2, Loader2, MessageSquare, XCircle, ExternalLink, X } from "lucide-react";
+import {
+  CheckCircle2,
+  Loader2,
+  MessageSquare,
+  XCircle,
+  ExternalLink,
+  X,
+  Send,
+  EyeOff,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/utils/cn";
@@ -12,6 +23,9 @@ import {
   approveAndPublishPost,
   requestPostChanges,
   rejectPost,
+  hidePost,
+  restoreHiddenPost,
+  deletePostAdmin,
 } from "@/app/(app)/admin/actions";
 import { reviewBadge } from "@/lib/utils/reviewStatus";
 import type { PostStatus, ReviewStatus } from "@/lib/db/types";
@@ -31,6 +45,7 @@ export interface ReviewItem {
   updatedAt: string;
   authorName: string;
   tags: string[];
+  deletedAt: string | null;
 }
 
 const TABS: { key: ReviewQueueFilter; label: string }[] = [
@@ -40,6 +55,8 @@ const TABS: { key: ReviewQueueFilter; label: string }[] = [
   { key: "approved", label: "Approved" },
   { key: "rejected", label: "Rejected" },
   { key: "published", label: "Published" },
+  { key: "hidden", label: "Hidden" },
+  { key: "deleted", label: "Deleted" },
 ];
 
 function formatDate(iso: string | null): string {
@@ -65,14 +82,36 @@ export function ReviewQueue({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ kind: FeedbackKind; item: ReviewItem } | null>(null);
 
+  // Approve & Publish (under_review) AND Publish (approved-but-unpublished)
+  // share the same server path — approveAndPublishPost is idempotent on the
+  // approval fields and flips the post live.
   function approve(item: ReviewItem) {
     setBusyId(item.id);
     startTransition(async () => {
       const res = await approveAndPublishPost(item.id);
       setBusyId(null);
-      if (!res.ok) toast.error(res.error || "Failed to approve.");
+      if (!res.ok) toast.error(res.error || "Failed to publish.");
       else {
         toast.success(`Published "${item.title}".`);
+        router.refresh();
+      }
+    });
+  }
+
+  function runAction(
+    item: ReviewItem,
+    action: (id: string) => Promise<{ ok: boolean; error?: string }>,
+    successMsg: string,
+    confirmMsg?: string,
+  ) {
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
+    setBusyId(item.id);
+    startTransition(async () => {
+      const res = await action(item.id);
+      setBusyId(null);
+      if (!res.ok) toast.error(res.error || "Failed.");
+      else {
+        toast.success(successMsg);
         router.refresh();
       }
     });
@@ -99,7 +138,7 @@ export function ReviewQueue({
   }
 
   return (
-    <div className="container mx-auto space-y-6 px-4 py-10">
+    <div className="content-container space-y-6 py-10">
       <header className="space-y-2">
         <h1 className="font-hero text-4xl font-bold uppercase tracking-tighter text-portal-text sm:text-5xl">
           Review Queue
@@ -134,7 +173,6 @@ export function ReviewQueue({
         <ul className="space-y-3">
           {items.map((item) => {
             const badge = reviewBadge(item.status, item.reviewStatus);
-            const actionable = item.reviewStatus === "under_review";
             const rowBusy = busyId === item.id && pending;
             return (
               <li
@@ -183,40 +221,24 @@ export function ReviewQueue({
                   </Link>
                 </div>
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => approve(item)}
-                    disabled={rowBusy || pending}
-                    title={actionable ? "Approve and publish now" : "Approve and publish"}
-                  >
-                    {rowBusy ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="h-4 w-4" />
-                    )}
-                    Approve &amp; Publish
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setFeedback({ kind: "changes", item })}
-                    disabled={pending}
-                  >
-                    <MessageSquare className="h-4 w-4" /> Request Changes
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setFeedback({ kind: "reject", item })}
-                    disabled={pending}
-                  >
-                    <XCircle className="h-4 w-4" /> Reject
-                  </Button>
-                </div>
+                <ItemActions
+                  item={item}
+                  rowBusy={rowBusy}
+                  pending={pending}
+                  onApprove={() => approve(item)}
+                  onRequestChanges={() => setFeedback({ kind: "changes", item })}
+                  onReject={() => setFeedback({ kind: "reject", item })}
+                  onHide={() => runAction(item, hidePost, "Post hidden from the feed.")}
+                  onRestore={() => runAction(item, restoreHiddenPost, "Post restored & published.")}
+                  onDelete={() =>
+                    runAction(
+                      item,
+                      deletePostAdmin,
+                      "Post deleted.",
+                      `Delete "${item.title || "Untitled"}"? This removes it from the public feed and admin lists. You can still find it under the Deleted tab.`,
+                    )
+                  }
+                />
               </li>
             );
           })}
@@ -234,6 +256,109 @@ export function ReviewQueue({
       )}
     </div>
   );
+}
+
+/**
+ * Status-aware action row. A post never offers approval once it's live —
+ * published posts get Hide/Delete, hidden posts get Restore/Delete. Approved-
+ * but-unpublished posts get Publish (and may still be sent back via Request
+ * Changes / Reject); under-review posts get Approve & Publish / Request Changes
+ * / Reject; changes-requested posts get Approve & Publish / Reject. Deleted +
+ * rejected rows are read-only (open from the card's "Open" link).
+ */
+function ItemActions({
+  item,
+  rowBusy,
+  pending,
+  onApprove,
+  onRequestChanges,
+  onReject,
+  onHide,
+  onRestore,
+  onDelete,
+}: {
+  item: ReviewItem;
+  rowBusy: boolean;
+  pending: boolean;
+  onApprove: () => void;
+  onRequestChanges: () => void;
+  onReject: () => void;
+  onHide: () => void;
+  onRestore: () => void;
+  onDelete: () => void;
+}) {
+  const busy = rowBusy || pending;
+  const spinnerOr = (icon: React.ReactNode) =>
+    rowBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : icon;
+
+  const isDeleted = item.deletedAt !== null;
+  const isHidden = item.status === "hidden";
+  const isPublished = item.status === "published";
+  const isApprovedUnpublished =
+    item.reviewStatus === "approved" && !isPublished && !isHidden && !isDeleted;
+  const isUnderReview = item.reviewStatus === "under_review" && !isDeleted;
+  const isChangesRequested = item.reviewStatus === "changes_requested" && !isDeleted;
+
+  // Deleted / rejected: nothing actionable here beyond the card's Open link.
+  if (isDeleted) return null;
+
+  const buttons: React.ReactNode[] = [];
+
+  if (isPublished) {
+    buttons.push(
+      <Button key="hide" type="button" size="sm" variant="outline" onClick={onHide} disabled={busy}>
+        {spinnerOr(<EyeOff className="h-4 w-4" />)} Hide
+      </Button>,
+      <Button key="del" type="button" size="sm" variant="outline" onClick={onDelete} disabled={busy}>
+        <Trash2 className="h-4 w-4" /> Delete
+      </Button>,
+    );
+  } else if (isHidden) {
+    buttons.push(
+      <Button key="restore" type="button" size="sm" onClick={onRestore} disabled={busy}>
+        {spinnerOr(<RotateCcw className="h-4 w-4" />)} Restore
+      </Button>,
+      <Button key="del" type="button" size="sm" variant="outline" onClick={onDelete} disabled={busy}>
+        <Trash2 className="h-4 w-4" /> Delete
+      </Button>,
+    );
+  } else if (isUnderReview) {
+    buttons.push(
+      <Button key="approve" type="button" size="sm" onClick={onApprove} disabled={busy}>
+        {spinnerOr(<CheckCircle2 className="h-4 w-4" />)} Approve &amp; Publish
+      </Button>,
+      <Button key="changes" type="button" size="sm" variant="outline" onClick={onRequestChanges} disabled={busy}>
+        <MessageSquare className="h-4 w-4" /> Request Changes
+      </Button>,
+      <Button key="reject" type="button" size="sm" variant="outline" onClick={onReject} disabled={busy}>
+        <XCircle className="h-4 w-4" /> Reject
+      </Button>,
+    );
+  } else if (isApprovedUnpublished) {
+    buttons.push(
+      <Button key="publish" type="button" size="sm" onClick={onApprove} disabled={busy}>
+        {spinnerOr(<Send className="h-4 w-4" />)} Publish
+      </Button>,
+      <Button key="changes" type="button" size="sm" variant="outline" onClick={onRequestChanges} disabled={busy}>
+        <MessageSquare className="h-4 w-4" /> Request Changes
+      </Button>,
+      <Button key="reject" type="button" size="sm" variant="outline" onClick={onReject} disabled={busy}>
+        <XCircle className="h-4 w-4" /> Reject
+      </Button>,
+    );
+  } else if (isChangesRequested) {
+    buttons.push(
+      <Button key="approve" type="button" size="sm" onClick={onApprove} disabled={busy}>
+        {spinnerOr(<CheckCircle2 className="h-4 w-4" />)} Approve &amp; Publish
+      </Button>,
+      <Button key="reject" type="button" size="sm" variant="outline" onClick={onReject} disabled={busy}>
+        <XCircle className="h-4 w-4" /> Reject
+      </Button>,
+    );
+  }
+
+  if (buttons.length === 0) return null;
+  return <div className="mt-4 flex flex-wrap gap-2">{buttons}</div>;
 }
 
 function FeedbackModal({

@@ -87,6 +87,7 @@ export default async function EditPostPage(props: { params: Promise<{ id: string
         collaborators: collaboration.collaborators,
         reviewComments: collaboration.reviewComments,
         approvedTeammates: collaboration.approvedTeammates,
+        pendingInvites: collaboration.pendingInvites,
         initialLock: collaboration.lock,
       }}
     />

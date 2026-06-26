@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, BookOpen, PenSquare, FileText, ShieldCheck, LogOut } from "lucide-react";
+import { LayoutDashboard, FileText, ShieldCheck, LogOut } from "lucide-react";
 import type { ProfileRow, AppRole } from "@/lib/db/types";
 import { canCreatePost, isManager, roleLabel } from "@/lib/auth/roles";
 import { cn } from "@/lib/utils/cn";
@@ -17,11 +17,12 @@ interface NavItem {
   show: (role: AppRole) => boolean;
 }
 
+// Top-nav is intentionally lean: the Signal Feed (/) and Transmit (/editor/new)
+// links were removed because the dashboard already surfaces "Open Signal Feed"
+// and "New Transmission" actions — the routes still exist, just not here.
 const NAV: NavItem[] = [
   { href: "/dashboard",  label: "Dashboard",   icon: LayoutDashboard, show: () => true },
-  { href: "/",           label: "Signal Feed", icon: BookOpen,        show: () => true },
   { href: "/me/posts",   label: "My Posts",    icon: FileText,        show: (r) => canCreatePost(r) },
-  { href: "/editor/new", label: "Transmit",    icon: PenSquare,       show: (r) => canCreatePost(r) },
   { href: "/admin",      label: "Admin",       icon: ShieldCheck,     show: (r) => isManager(r) },
 ];
 
@@ -38,7 +39,7 @@ export function TopNav({ profile, effectiveRole, viewModeActive }: Props) {
 
   return (
     <header className="sticky top-0 z-40 border-b border-portal-border-soft bg-portal-main/90 backdrop-blur-md">
-      <div className="container mx-auto flex h-16 items-center gap-6 px-4">
+      <div className="content-container flex h-16 items-center gap-6">
         <BrandLockup size="sm" href="/dashboard" withSubtitle={false} />
 
         <nav className="hidden flex-1 items-center gap-1 md:flex" aria-label="Primary">
@@ -89,7 +90,7 @@ export function TopNav({ profile, effectiveRole, viewModeActive }: Props) {
       </div>
 
       {/* Mobile nav strip */}
-      <nav className="container mx-auto flex items-center gap-1 overflow-x-auto px-4 pb-3 md:hidden" aria-label="Primary mobile">
+      <nav className="content-container flex items-center gap-1 overflow-x-auto pb-3 md:hidden" aria-label="Primary mobile">
         {visibleNav.map((item) => {
           const active = pathname === item.href || pathname.startsWith(item.href + "/");
           return (

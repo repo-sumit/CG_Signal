@@ -315,6 +315,24 @@
    Components
    ============================================================ */
 @layer components {
+  /* Shared page shells — one max-width + fluid gutter for every authenticated
+     surface so the dashboard, "my posts", admin, and review queue all line up.
+     The feed shell is wider for the public post grid. Use these instead of
+     `container mx-auto px-4` (which fixed the gutter and capped width
+     inconsistently). Pair with vertical spacing utilities (py-*, space-y-*). */
+  .content-container {
+    width: 100%;
+    max-width: 1280px;
+    margin-inline: auto;
+    padding-inline: clamp(16px, 4vw, 48px);
+  }
+  .feed-container {
+    width: 100%;
+    max-width: 1440px;
+    margin-inline: auto;
+    padding-inline: clamp(16px, 4vw, 64px);
+  }
+
   /* Signature panel — outlined dark card. 1px border feels modern at panel
      scale; only the "bright" variant keeps the heavier 1.5px treatment to
      stay punchy. */

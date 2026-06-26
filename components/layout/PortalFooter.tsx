@@ -3,7 +3,7 @@ import { SystemLabel } from "@/components/portal/SystemLabel";
 export function PortalFooter() {
   return (
     <footer className="border-t border-portal-border-soft bg-portal-panel-soft">
-      <div className="container mx-auto flex flex-col gap-3 px-4 py-8 md:flex-row md:items-center md:justify-between">
+      <div className="content-container flex flex-col gap-3 py-8 md:flex-row md:items-center md:justify-between">
         {/* Left — green system-dot fronts the brand line. The dot stays on
             its own SystemLabel so the existing `signal-dot` CSS keeps doing
             its pulse, and the label text reuses the same uppercase/mono

@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ChevronLeft, Mail, Search, UserMinus, UserPlus } from "lucide-react";
+import { ChevronLeft, Mail, Search, UserMinus, UserPlus, MailCheck, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { requireManager } from "@/lib/auth/guards";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
+import { isSandboxSender } from "@/lib/email/newsletter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -17,6 +18,8 @@ interface SubscriberRow {
   source: string | null;
   unsubscribed_at: string | null;
   created_at: string;
+  welcome_sent_at: string | null;
+  user_id: string | null;
 }
 
 interface SearchParams {
@@ -48,7 +51,7 @@ export default async function SubscribersAdminPage(
 
   let query = service
     .from("subscribers")
-    .select("id, email, source, unsubscribed_at, created_at")
+    .select("id, email, source, unsubscribed_at, created_at, welcome_sent_at, user_id")
     .order("created_at", { ascending: false });
 
   if (status === "active") query = query.is("unsubscribed_at", null);
@@ -62,21 +65,35 @@ export default async function SubscribersAdminPage(
 
   // Headline counts come from a separate count query so totals reflect the
   // whole table — not just the filtered/limited slice rendered below.
-  const [{ count: totalAll }, { count: totalActive }, { count: totalUnsub }] =
-    await Promise.all([
-      service.from("subscribers").select("id", { count: "exact", head: true }),
-      service
-        .from("subscribers")
-        .select("id", { count: "exact", head: true })
-        .is("unsubscribed_at", null),
-      service
-        .from("subscribers")
-        .select("id", { count: "exact", head: true })
-        .not("unsubscribed_at", "is", null),
-    ]);
+  const [
+    { count: totalAll },
+    { count: totalActive },
+    { count: totalUnsub },
+    { count: totalWelcomed },
+    { data: lastNl },
+  ] = await Promise.all([
+    service.from("subscribers").select("id", { count: "exact", head: true }),
+    service.from("subscribers").select("id", { count: "exact", head: true }).is("unsubscribed_at", null),
+    service.from("subscribers").select("id", { count: "exact", head: true }).not("unsubscribed_at", "is", null),
+    service.from("subscribers").select("id", { count: "exact", head: true }).not("welcome_sent_at", "is", null),
+    service
+      .from("posts")
+      .select("title, slug, newsletter_sent_at")
+      .not("newsletter_sent_at", "is", null)
+      .order("newsletter_sent_at", { ascending: false })
+      .limit(1),
+  ]);
+  const lastNewsletter = (lastNl?.[0] ?? null) as
+    | { title: string; slug: string; newsletter_sent_at: string }
+    | null;
+
+  // Resend delivery configuration — the usual reason "no one receives email".
+  const resendFrom = process.env.RESEND_FROM ?? "";
+  const resendConfigured = !!process.env.RESEND_API_KEY && !!resendFrom;
+  const sandbox = isSandboxSender(resendFrom);
 
   return (
-    <main className="container mx-auto space-y-6 px-4 py-8">
+    <main className="content-container space-y-6 py-8">
       <div className="space-y-2">
         <Button asChild variant="ghost" size="sm" className="-ml-2">
           <Link href="/admin">
@@ -91,16 +108,72 @@ export default async function SubscribersAdminPage(
         </p>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile label="Total" value={totalAll ?? 0} icon={Mail} />
         <StatTile label="Active" value={totalActive ?? 0} icon={UserPlus} tone="green" />
-        <StatTile
-          label="Unsubscribed"
-          value={totalUnsub ?? 0}
-          icon={UserMinus}
-          tone="muted"
-        />
+        <StatTile label="Unsubscribed" value={totalUnsub ?? 0} icon={UserMinus} tone="muted" />
+        <StatTile label="Welcome sent" value={totalWelcomed ?? 0} icon={MailCheck} />
       </div>
+
+      {/* Delivery diagnostics — surfaces the usual reasons emails don't arrive. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <MailCheck className="h-4 w-4" /> Delivery diagnostics
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {!resendConfigured ? (
+            <div className="flex items-start gap-2 rounded-md border border-portal-yellow/30 bg-portal-yellow/10 p-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-portal-yellow" />
+              <div>
+                <div className="font-ui font-bold text-portal-text">Email is not configured</div>
+                <p className="mt-0.5 text-xs text-portal-text-muted">
+                  Set <code>RESEND_API_KEY</code> and <code>RESEND_FROM</code> to send the welcome
+                  email and per-post newsletters. Publishing still works without it.
+                </p>
+              </div>
+            </div>
+          ) : sandbox ? (
+            <div className="flex items-start gap-2 rounded-md border border-portal-yellow/30 bg-portal-yellow/10 p-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-portal-yellow" />
+              <div>
+                <div className="font-ui font-bold text-portal-text">Resend sandbox sender detected</div>
+                <p className="mt-0.5 text-xs text-portal-text-muted">
+                  <code>RESEND_FROM</code> uses an <code>@resend.dev</code> address — Resend will
+                  only deliver to the account owner. Verify a domain and set{" "}
+                  <code>RESEND_FROM=&quot;CG Signal &lt;signal@your-domain&gt;&quot;</code> to reach
+                  all subscribers.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 rounded-md border border-portal-green/30 bg-portal-green/10 p-3">
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-portal-green" />
+              <div>
+                <div className="font-ui font-bold text-portal-text">Email configured</div>
+                <p className="mt-0.5 text-xs text-portal-text-muted">
+                  Sending from a verified domain. Newsletters fire on publish to all active
+                  subscribers.
+                </p>
+              </div>
+            </div>
+          )}
+          <div className="text-xs text-portal-text-muted">
+            {lastNewsletter ? (
+              <>
+                Last newsletter dispatched {formatDate(lastNewsletter.newsletter_sent_at)} for{" "}
+                <Link href={`/posts/${lastNewsletter.slug}`} className="text-portal-blue hover:underline">
+                  {lastNewsletter.title || "Untitled"}
+                </Link>
+                .
+              </>
+            ) : (
+              "No newsletter has been dispatched yet."
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -168,12 +241,13 @@ export default async function SubscribersAdminPage(
             </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[560px] text-sm">
+              <table className="w-full min-w-[680px] text-sm">
                 <thead>
                   <tr className="border-b border-portal-border-soft text-left text-[10px] uppercase tracking-wider text-portal-text-muted">
                     <th className="px-2 py-2 font-medium">Email</th>
                     <th className="px-2 py-2 font-medium">Status</th>
                     <th className="px-2 py-2 font-medium">Source</th>
+                    <th className="px-2 py-2 font-medium">Welcome</th>
                     <th className="px-2 py-2 font-medium">Subscribed</th>
                     <th className="px-2 py-2 font-medium">Unsubscribed</th>
                   </tr>
@@ -191,6 +265,9 @@ export default async function SubscribersAdminPage(
                       </td>
                       <td className="px-2 py-2 text-portal-text-muted">
                         {r.source ?? "—"}
+                      </td>
+                      <td className="px-2 py-2 text-portal-text-muted tabular-nums">
+                        {r.welcome_sent_at ? formatDate(r.welcome_sent_at) : "—"}
                       </td>
                       <td className="px-2 py-2 text-portal-text-muted tabular-nums">
                         {formatDate(r.created_at)}

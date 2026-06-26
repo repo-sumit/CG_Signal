@@ -66,6 +66,7 @@ export default async function NewEditorPage(
         collaborators: [],
         reviewComments: [],
         approvedTeammates: [],
+        pendingInvites: [],
         initialLock: null,
       }}
     />

@@ -91,6 +91,9 @@ export async function sendPerPostNewsletter(postId: string): Promise<NewsletterR
   const from = process.env.RESEND_FROM;
   if (!process.env.RESEND_API_KEY || !from) {
     // No-op when Resend isn't configured. The publish flow keeps working.
+    console.warn(
+      `[newsletter:${postId}] skipped — Resend not configured (set RESEND_API_KEY + RESEND_FROM).`,
+    );
     return { ok: true, skipped: "not_configured" };
   }
 

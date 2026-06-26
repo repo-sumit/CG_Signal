@@ -205,3 +205,49 @@ export async function notifyWriterOfReview(notice: DecisionNotice): Promise<void
   const res = await sendEmail({ to: notice.writerEmail, subject, html, text });
   if (!res.ok) console.error("[reviewNotifications] decision email failed", res.error);
 }
+
+/**
+ * Invite a (not-yet-registered) collaborator by email. They sign in with their
+ * ConveGenius Google account and the pending invite activates automatically.
+ * Best-effort; no-op when Resend is unconfigured.
+ */
+export async function notifyCollaboratorInvite(notice: {
+  email: string;
+  postId: string;
+}): Promise<void> {
+  if (!process.env.RESEND_API_KEY || !process.env.RESEND_FROM) return;
+
+  let postTitle = "a CG Signal draft";
+  try {
+    const service = createSupabaseServiceClient();
+    const { data } = await service
+      .from("posts")
+      .select("title")
+      .eq("id", notice.postId)
+      .maybeSingle();
+    const t = (data as { title?: string } | null)?.title;
+    if (t && t.trim()) postTitle = t.trim();
+  } catch (err) {
+    console.error("[notifyCollaboratorInvite] post lookup failed", err);
+  }
+
+  const loginUrl = `${publicEnv.appUrl}/login?redirect=${encodeURIComponent("/me/posts")}`;
+  const html = reviewShell({
+    eyebrow: "Collaboration invite",
+    heading: "You've been invited to collaborate",
+    bodyHtml:
+      `<p style="margin:0 0 14px;font-size:16px;line-height:1.6;color:#374151;">You've been invited to collaborate on <strong>${esc(postTitle)}</strong> on CG Signal.</p>` +
+      `<p style="margin:0;font-size:15px;line-height:1.6;color:#374151;">Sign in with your ConveGenius Google account to open it — the draft will appear under "My Posts → Shared with me".</p>`,
+    ctaLabel: "Sign in to CG Signal →",
+    ctaHref: loginUrl,
+  });
+  const text = `You've been invited to collaborate on "${postTitle}" on CG Signal.\n\nSign in with your ConveGenius account: ${loginUrl}`;
+
+  const res = await sendEmail({
+    to: notice.email,
+    subject: "CG Signal · You've been invited to collaborate",
+    html,
+    text,
+  });
+  if (!res.ok) console.error("[notifyCollaboratorInvite] email failed", res.error);
+}

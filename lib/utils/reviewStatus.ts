@@ -28,6 +28,7 @@ export interface ReviewBadge {
 export function reviewBadge(status: PostStatus, review: ReviewStatus): ReviewBadge {
   if (status === "published") return { label: "Published", variant: "success" };
   if (status === "scheduled") return { label: "Scheduled", variant: "blue" };
+  if (status === "hidden") return { label: "Hidden", variant: "secondary" };
   if (status === "archived") return { label: "Archived", variant: "destructive" };
 
   switch (review) {

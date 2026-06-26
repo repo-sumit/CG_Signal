@@ -141,6 +141,14 @@ export interface ApprovedTeammate {
   role: AppRole;
 }
 
+/** A pending email invite (invitee hasn't logged in / accepted yet). */
+export interface PendingInviteView {
+  id: string;
+  email: string;
+  role: PostCollaboratorRole;
+  createdAt: string;
+}
+
 export interface PostOwnerView {
   id: string;
   name: string;
@@ -166,5 +174,6 @@ export interface EditorCollaborationProps {
   collaborators: CollaboratorView[];
   reviewComments: ReviewCommentView[];
   approvedTeammates: ApprovedTeammate[];
+  pendingInvites: PendingInviteView[];
   initialLock: LockView | null;
 }

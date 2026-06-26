@@ -6,7 +6,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { listTeam } from "@/lib/db/profiles";
 import { listPostsThisWeek, listOwnPosts } from "@/lib/db/posts";
 import { weekStartISO } from "@/lib/utils/dates";
-import { canCreatePost, isManager } from "@/lib/auth/roles";
+import { canCreatePost, canPublishDirectly, isManager } from "@/lib/auth/roles";
 import { effectiveRole } from "@/lib/auth/viewMode";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -64,8 +64,21 @@ export default async function DashboardPage() {
   );
   const firstName = profile.full_name?.split(" ")[0] || profile.email.split("@")[0];
 
+  // The weekly schedule (and its cadence/missed-day logic) only applies to the
+  // core team (authors/admins). General writers post on their own time and go
+  // through review, so they get a review-status summary instead.
+  const isCoreTeam = canPublishDirectly(role);
+  const writerCounts = {
+    drafts: ownPosts.filter((p) => p.status === "draft" && p.review_status === "not_submitted").length,
+    underReview: ownPosts.filter((p) => p.review_status === "under_review").length,
+    changesRequested: ownPosts.filter((p) => p.review_status === "changes_requested").length,
+    rejected: ownPosts.filter((p) => p.review_status === "rejected").length,
+    published: ownPosts.filter((p) => p.status === "published").length,
+    hidden: ownPosts.filter((p) => p.status === "hidden").length,
+  };
+
   return (
-    <div className="container mx-auto space-y-8 px-4 py-10">
+    <div className="content-container space-y-8 py-10">
       {/* Hero block — minimal, no decorative pattern */}
       <section className="space-y-4">
         <SystemLabel tone="orange">Welcome back</SystemLabel>
@@ -194,11 +207,15 @@ export default async function DashboardPage() {
         </div>
 
         <aside className="space-y-6">
-          <WeeklyScheduleCard
-            team={team}
-            postsByAuthorThisWeek={postsByAuthor}
-            canManageSchedule={isManager(role)}
-          />
+          {isCoreTeam ? (
+            <WeeklyScheduleCard
+              team={team}
+              postsByAuthorThisWeek={postsByAuthor}
+              canManageSchedule={isManager(role)}
+            />
+          ) : (
+            <WriterSignalsCard counts={writerCounts} />
+          )}
 
           {isManager(role) && (
             <Panel>
@@ -265,4 +282,62 @@ function StatBox({
     );
   }
   return <div className="rounded-md border border-portal-border-soft bg-portal-panel-soft p-3">{inner}</div>;
+}
+
+/**
+ * Review-status summary shown to general writers in place of the weekly
+ * schedule. Writers are exempt from the Mon–Fri cadence — they post anytime and
+ * an admin reviews before it goes live.
+ */
+function WriterSignalsCard({
+  counts,
+}: {
+  counts: {
+    drafts: number;
+    underReview: number;
+    changesRequested: number;
+    rejected: number;
+    published: number;
+    hidden: number;
+  };
+}) {
+  const rows: { label: string; value: number; variant: "muted" | "warning" | "destructive" | "success" | "secondary" }[] = [
+    { label: "Drafts", value: counts.drafts, variant: "muted" },
+    { label: "Under Review", value: counts.underReview, variant: "warning" },
+    { label: "Changes Requested", value: counts.changesRequested, variant: "warning" },
+    { label: "Rejected", value: counts.rejected, variant: "destructive" },
+    { label: "Published", value: counts.published, variant: "success" },
+    // Only surfaced when an admin has hidden one of their posts.
+    ...(counts.hidden > 0
+      ? [{ label: "Hidden by admin", value: counts.hidden, variant: "secondary" as const }]
+      : []),
+  ];
+  return (
+    <Panel>
+      <PanelHeader>
+        <div className="font-hero text-base font-bold uppercase tracking-tighter text-portal-text">
+          Your signals
+        </div>
+      </PanelHeader>
+      <PanelBody className="space-y-3">
+        <p className="text-sm text-portal-text-muted">
+          Post anytime. Your signal will be reviewed by an admin before it goes live.
+        </p>
+        <ul className="space-y-1.5">
+          {rows.map((r) => (
+            <li key={r.label} className="flex items-center justify-between gap-3">
+              <span className="text-[11px] uppercase tracking-wider text-portal-text-muted">{r.label}</span>
+              <Badge variant={r.variant}>{r.value}</Badge>
+            </li>
+          ))}
+        </ul>
+        <Link
+          href="/me/posts"
+          className="inline-block text-[11px] uppercase tracking-wider text-portal-blue hover:underline"
+        >
+          View all my posts →
+        </Link>
+      </PanelBody>
+    </Panel>
+  );
 }

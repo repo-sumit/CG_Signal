@@ -3,14 +3,17 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { UserPlus, X, Users, Loader2 } from "lucide-react";
+import { UserPlus, X, Users, Loader2, Mail, Clock } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
+import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import {
   inviteCollaborator,
+  inviteCollaboratorByEmail,
+  cancelPendingInvite,
   removeCollaborator,
   updateCollaboratorRole,
 } from "@/app/(app)/editor/actions";
@@ -18,6 +21,7 @@ import { COLLAB_ROLE_LABEL } from "@/lib/auth/collaboration";
 import type {
   ApprovedTeammate,
   CollaboratorView,
+  PendingInviteView,
   PostOwnerView,
 } from "@/lib/auth/collaboration";
 import type { PostCollaboratorRole } from "@/lib/db/types";
@@ -29,6 +33,7 @@ interface Props {
   currentUserId: string;
   collaborators: CollaboratorView[];
   approvedTeammates: ApprovedTeammate[];
+  pendingInvites: PendingInviteView[];
 }
 
 function RoleBadge({ role }: { role: PostCollaboratorRole | "owner" }) {
@@ -45,14 +50,17 @@ export function CollaboratorsPanel({
   currentUserId,
   collaborators,
   approvedTeammates,
+  pendingInvites,
 }: Props) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [inviteeId, setInviteeId] = useState("");
   const [inviteRole, setInviteRole] = useState<PostCollaboratorRole>("editor");
+  const [search, setSearch] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
 
-  // Eligible invitees = approved teammates who aren't the owner, an existing
-  // collaborator, or the current user.
+  // Eligible invitees = any invitable ConveGenius user who isn't the owner, an
+  // existing collaborator, or the current user.
   const eligible = useMemo(() => {
     const taken = new Set<string>([
       ...(owner ? [owner.id] : []),
@@ -61,6 +69,15 @@ export function CollaboratorsPanel({
     ]);
     return approvedTeammates.filter((t) => !taken.has(t.id));
   }, [approvedTeammates, collaborators, owner, currentUserId]);
+
+  // Search filters by name OR email so a big team list stays usable.
+  const filteredEligible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return eligible;
+    return eligible.filter(
+      (t) => t.name.toLowerCase().includes(q) || t.email.toLowerCase().includes(q),
+    );
+  }, [eligible, search]);
 
   const handleInvite = () => {
     if (!postId || !inviteeId) return;
@@ -72,6 +89,38 @@ export function CollaboratorsPanel({
       }
       toast.success("Collaborator added.");
       setInviteeId("");
+      setSearch("");
+      router.refresh();
+    });
+  };
+
+  const handleInviteByEmail = () => {
+    if (!postId || !inviteEmail.trim()) return;
+    startTransition(async () => {
+      const res = await inviteCollaboratorByEmail({
+        postId,
+        email: inviteEmail.trim(),
+        role: inviteRole,
+      });
+      if (!res.ok) {
+        toast.error(res.error || "Could not send invite.");
+        return;
+      }
+      toast.success("Invite sent.");
+      setInviteEmail("");
+      router.refresh();
+    });
+  };
+
+  const handleCancelInvite = (inviteId: string, email: string) => {
+    if (!postId) return;
+    startTransition(async () => {
+      const res = await cancelPendingInvite({ postId, inviteId });
+      if (!res.ok) {
+        toast.error(res.error || "Could not cancel invite.");
+        return;
+      }
+      toast.success(`Invite to ${email} cancelled.`);
       router.refresh();
     });
   };
@@ -174,40 +223,79 @@ export function CollaboratorsPanel({
               Save your draft first — then you can invite teammates to collaborate.
             </p>
           ) : (
-            <div className="space-y-2 border-t border-portal-border-soft pt-3">
+            <div className="space-y-3 border-t border-portal-border-soft pt-3">
+              {/* Pending email invites */}
+              {pendingInvites.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[10px] uppercase tracking-wider text-portal-text-muted">
+                    Pending invites
+                  </div>
+                  <ul className="space-y-1.5">
+                    {pendingInvites.map((inv) => (
+                      <li key={inv.id} className="flex items-center gap-2">
+                        <Clock className="h-3.5 w-3.5 shrink-0 text-portal-text-muted" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-ui text-xs text-portal-text">{inv.email}</div>
+                        </div>
+                        <RoleBadge role={inv.role} />
+                        <button
+                          type="button"
+                          onClick={() => handleCancelInvite(inv.id, inv.email)}
+                          disabled={pending}
+                          aria-label={`Cancel invite to ${inv.email}`}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-full text-portal-text-muted hover:bg-portal-panel-soft hover:text-portal-red disabled:opacity-50"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               <div className="text-[10px] uppercase tracking-wider text-portal-text-muted">
                 Invite a teammate
               </div>
-              {eligible.length === 0 ? (
-                <p className="text-[11px] leading-relaxed text-portal-text-muted">
-                  Everyone on the team is already on this post.
-                </p>
-              ) : (
+
+              {/* Role applies to whichever invite path is used. */}
+              <Select
+                value={inviteRole}
+                onChange={(e) => setInviteRole(e.target.value as PostCollaboratorRole)}
+                disabled={pending}
+                aria-label="Collaborator role"
+                className="h-9 w-full text-xs"
+              >
+                <option value="editor">Editor — can co-write (with the edit lock)</option>
+                <option value="reviewer">Reviewer — can only comment</option>
+              </Select>
+
+              {/* Pick an existing user */}
+              {eligible.length > 0 && (
                 <>
-                  <Select
-                    value={inviteeId}
-                    onChange={(e) => setInviteeId(e.target.value)}
+                  <Input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search teammates by name or email…"
                     disabled={pending}
-                    aria-label="Choose a teammate to invite"
+                    aria-label="Search teammates"
                     className="h-9 text-xs"
-                  >
-                    <option value="">Choose a teammate…</option>
-                    {eligible.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </Select>
+                  />
                   <div className="flex items-center gap-2">
                     <Select
-                      value={inviteRole}
-                      onChange={(e) => setInviteRole(e.target.value as PostCollaboratorRole)}
+                      value={inviteeId}
+                      onChange={(e) => setInviteeId(e.target.value)}
                       disabled={pending}
-                      aria-label="Collaborator role"
+                      aria-label="Choose a teammate to invite"
                       className="h-9 flex-1 text-xs"
                     >
-                      <option value="editor">Editor</option>
-                      <option value="reviewer">Reviewer</option>
+                      <option value="">
+                        {filteredEligible.length === 0 ? "No matches" : "Choose a teammate…"}
+                      </option>
+                      {filteredEligible.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} · {t.email}
+                        </option>
+                      ))}
                     </Select>
                     <Button
                       type="button"
@@ -220,15 +308,42 @@ export function CollaboratorsPanel({
                       ) : (
                         <UserPlus className="h-3.5 w-3.5" />
                       )}
-                      Invite
+                      Add
                     </Button>
                   </div>
-                  <p className="text-[10px] leading-relaxed text-portal-text-muted">
-                    Editors can co-write when they hold the edit lock. Reviewers can only leave
-                    comments.
-                  </p>
                 </>
               )}
+
+              {/* Or invite by email (not-yet-registered ConveGenius users) */}
+              <div className="flex items-center gap-2">
+                <Input
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  placeholder="name@convegenius.ai"
+                  disabled={pending}
+                  aria-label="Invite by email"
+                  className="h-9 flex-1 text-xs"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={handleInviteByEmail}
+                  disabled={pending || !inviteEmail.trim()}
+                >
+                  {pending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Mail className="h-3.5 w-3.5" />
+                  )}
+                  Email
+                </Button>
+              </div>
+              <p className="text-[10px] leading-relaxed text-portal-text-muted">
+                Invite anyone with a ConveGenius account. If they haven&apos;t signed in yet, the
+                invite activates the first time they log in.
+              </p>
             </div>
           ))}
       </CardContent>
