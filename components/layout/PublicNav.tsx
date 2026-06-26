@@ -16,7 +16,7 @@ export async function PublicNav() {
   const ctx = await getSessionContext();
   return (
     <header className="sticky top-0 z-40 border-b border-portal-border-soft bg-portal-main/90 backdrop-blur-md">
-      <div className="container mx-auto flex h-16 items-center gap-4 px-4">
+      <div className="feed-container flex h-16 items-center gap-4">
         <BrandLockup size="sm" href="/" withSubtitle={false} />
 
         <nav className="ml-2 hidden items-center gap-1 md:flex" aria-label="Primary">

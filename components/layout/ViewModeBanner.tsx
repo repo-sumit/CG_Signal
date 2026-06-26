@@ -26,7 +26,7 @@ export function ViewModeBanner() {
       role="status"
       className="border-b border-portal-yellow/30 bg-portal-yellow/10 text-portal-yellow"
     >
-      <div className="container mx-auto flex flex-wrap items-center justify-between gap-3 px-4 py-2 text-[11px] uppercase tracking-wider">
+      <div className="content-container flex flex-wrap items-center justify-between gap-3 py-2 text-[11px] uppercase tracking-wider">
         <span className="inline-flex items-center gap-2">
           <Eye className="h-3.5 w-3.5" />
           <strong className="font-bold">View mode active</strong>

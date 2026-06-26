@@ -130,7 +130,7 @@ export function SubscribeSection({
     <section
       id={id ?? (source === "post" ? "newsletter-subscribe" : undefined)}
       className={cn(
-        "container mx-auto w-full max-w-full min-w-0 px-4",
+        "feed-container w-full min-w-0",
         compact ? "py-8 sm:py-10" : "py-12 sm:py-16",
       )}
     >

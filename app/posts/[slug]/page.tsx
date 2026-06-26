@@ -141,7 +141,7 @@ export default async function PublicPostPage(props: { params: Promise<{ slug: st
       <PublicNav />
 
       <main className="flex-1">
-        <div className="container mx-auto max-w-3xl px-4 py-10">
+        <div className="content-container max-w-3xl py-10">
           <Button asChild variant="ghost" size="sm" className="mb-6">
             <Link href="/">
               <ChevronLeft className="h-4 w-4" /> All posts

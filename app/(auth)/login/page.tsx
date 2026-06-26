@@ -23,7 +23,7 @@ export default async function LoginPage(
 
   return (
     <main className="relative min-h-screen">
-      <div className="container relative mx-auto flex min-h-screen flex-col justify-center px-4 py-10">
+      <div className="content-container relative flex min-h-screen flex-col justify-center py-10">
         <div className="mx-auto grid w-full max-w-5xl gap-12 lg:grid-cols-[1.1fr_1fr] lg:gap-16">
           {/* Brand zone */}
           <div className="flex flex-col gap-6">

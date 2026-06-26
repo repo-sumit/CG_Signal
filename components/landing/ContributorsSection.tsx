@@ -8,7 +8,7 @@ interface Props {
 export function ContributorsSection({ contributors }: Props) {
   if (contributors.length === 0) return null;
   return (
-    <section className="container mx-auto w-full max-w-full min-w-0 px-4 py-12 sm:py-16">
+    <section className="feed-container w-full min-w-0 py-12 sm:py-16">
       <div className="mb-6 flex items-end justify-between gap-4">
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wider text-portal-orange">The crew</div>

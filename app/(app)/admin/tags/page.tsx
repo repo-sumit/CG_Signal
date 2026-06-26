@@ -11,7 +11,7 @@ export default async function TagsPage() {
   await requireManager();
   const tags = await listTags();
   return (
-    <main className="container mx-auto max-w-3xl px-4 py-8">
+    <main className="content-container max-w-3xl py-8">
       <h1 className="mb-1 text-2xl font-semibold tracking-tight">Tags</h1>
       <p className="mb-6 text-sm text-muted-foreground">Create or remove tags for posts.</p>
       <Card>

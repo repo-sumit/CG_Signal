@@ -18,7 +18,7 @@ export const PostEditor = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="container mx-auto px-4 py-12">
+      <div className="content-container py-12">
         <div className="h-8 w-48 animate-pulse rounded bg-portal-panel-soft" />
         <div className="mt-6 h-[480px] animate-pulse rounded-md bg-portal-panel-soft" />
         <p className="mt-3 font-ui text-[10px] uppercase tracking-wider text-portal-text-muted">

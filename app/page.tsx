@@ -118,7 +118,7 @@ export default async function PublicLandingPage(props: { searchParams: Promise<S
             the page — section rhythm is deliberate: hero > feed > subscribe. */}
         <section className="relative overflow-hidden">
           <div aria-hidden className="absolute inset-0 grid-overlay opacity-40" />
-          <div className="container relative mx-auto px-4 py-16 sm:py-24">
+          <div className="feed-container relative py-16 sm:py-24">
             <div className="grid gap-12 lg:grid-cols-[1.35fr_1fr] lg:items-end">
               <div className="max-w-3xl">
                 {/* System eyebrow — a single deliberate kicker. Pulsing dot +
@@ -176,7 +176,7 @@ export default async function PublicLandingPage(props: { searchParams: Promise<S
         {/* ============ Filter strip ============ */}
         {/* Sits immediately under the hero with a tight pb so the feed below
             it reads as continuous, not three stacked sections. */}
-        <section className="container mx-auto px-4" id="feed">
+        <section className="feed-container" id="feed">
           <div className="rounded-md border border-portal-border-soft bg-portal-panel-soft p-4">
             <form className="flex flex-wrap items-center gap-3" action="/" method="get">
               {/* min-w-0 is critical — without it the flex parent can't shrink
@@ -238,7 +238,7 @@ export default async function PublicLandingPage(props: { searchParams: Promise<S
         </section>
 
         {/* ============ Uniform post feed ============ */}
-        <section className="container mx-auto px-4 py-10 sm:py-14">
+        <section className="feed-container py-10 sm:py-14">
           {filtered.length === 0 ? (
             <EmptyTransmissions filtered={!!(searchParams.q || searchParams.tag)} />
           ) : (
@@ -265,13 +265,13 @@ export default async function PublicLandingPage(props: { searchParams: Promise<S
             consistently through the page. The internal ContributorsSection
             still owns its own heading + grid; this row is a deliberate
             running-head, not a duplicate H2. */}
-        <section className="container mx-auto px-4 pt-6" id="contributors">
+        <section className="feed-container pt-6" id="contributors">
           <SectionEyebrow number="02" label="The crew" tail={`${totalAuthors} active`} />
         </section>
         <ContributorsSection contributors={contributors} />
 
         {/* ============ Subscribe ============ */}
-        <section className="container mx-auto px-4 pt-6">
+        <section className="feed-container pt-6">
           <SectionEyebrow number="03" label="Receive the next signal" tail="No spam" />
         </section>
         <SubscribeSection />
